@@ -23,9 +23,9 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import QueuePool
 
 # Environment variables
+DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://your_database_url')
+REDIS_URL = os.environ.get('REDIS_URL', 'redis://your_redis_url')
 
-DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://qhbw_sql_user:EJyTGHeLljJ1TCXlLtWPYPtrGDDzOLpg@dpg-cqkb5dbqf0us73c6a0lg-a.oregon-postgres.render.com/qhbw_sql')
-REDIS_URL = os.environ.get('REDIS_URL', 'redis://red-cql0cgt6l47c73f0loh0:6379')
 # Initialize SQLAlchemy engine with connection pooling
 engine = create_engine(DATABASE_URL, poolclass=QueuePool, pool_size=10, max_overflow=20)
 Session = sessionmaker(bind=engine)
@@ -34,26 +34,17 @@ session = Session()
 # Initialize Redis client
 redis_client = redis.Redis.from_url(REDIS_URL)
 
-# Load data from JSON file and insert into Redis
-with open('redis_data.json', 'r') as f:
-    redis_data = json.load(f)
+# Function to set available hole IDs and stages from the database
+def set_available_hole_ids_and_stages():
+    hole_ids = session.query(available_data.c.hole_id).distinct().all()
+    stages = session.query(available_data.c.stage).distinct().all()
+    
+    redis_client.sadd("available_hole_ids", *[hole_id for hole_id, in hole_ids])
+    for hole_id, in hole_ids:
+        stage_list = session.query(available_data.c.stage).filter(available_data.c.hole_id == hole_id).all()
+        redis_client.sadd(f"available_stages:{hole_id}", *[stage for stage, in stage_list])
 
-for key, value in redis_data.items():
-    redis_client.set(key, value)
-
-# Set available hole IDs and stages
-hole_ids = set()
-stages = {}
-for key in redis_data.keys():
-    _, hole_id, stage = key.split(':')
-    hole_ids.add(hole_id)
-    if hole_id not in stages:
-        stages[hole_id] = set()
-    stages[hole_id].add(stage)
-
-redis_client.sadd("available_hole_ids", *hole_ids)
-for hole_id, stage_set in stages.items():
-    redis_client.sadd(f"available_stages:{hole_id}", *stage_set)
+set_available_hole_ids_and_stages()
 
 print("Data loaded into Redis successfully!")
 
@@ -133,7 +124,6 @@ def get_unique_values(table_name, column_name):
         if hole_id:
             return [stage.decode() for stage in redis_client.smembers(f"available_stages:{hole_id.decode()}")]
     return []
-   
 
 # Function to extract file details
 def extract_file_details(file_name):
@@ -216,17 +206,6 @@ def store_processed_data(df, hole_id, stage):
         session.rollback()
         print(f"Error storing processed data: {e}")
 
-# Function to store grouting summary into the database
-def store_grouting_summary(summary):
-    try:
-        insert_stmt = grouting_summary.insert().values(**summary)
-        session.execute(insert_stmt)
-        session.commit()
-        print(f"Grouting summary for {summary['hole_id']} {summary['stage']} stored successfully.")
-    except Exception as e:
-        session.rollback()
-        print(f"Error storing grouting summary: {e}")
-
 # Function to store available data into the database
 def store_available_data(hole_id, stage):
     try:
@@ -237,6 +216,17 @@ def store_available_data(hole_id, stage):
     except Exception as e:
         session.rollback()
         print(f"Error storing available data: {e}")
+
+# Function to store grouting summary into the database
+def store_grouting_summary(summary):
+    try:
+        insert_stmt = grouting_summary.insert().values(**summary)
+        session.execute(insert_stmt)
+        session.commit()
+        print(f"Grouting summary for {summary['hole_id']} {summary['stage']} stored successfully.")
+    except Exception as e:
+        session.rollback()
+        print(f"Error storing grouting summary: {e}")
 
 # Function to retrieve processed data from the database
 def retrieve_processed_data(hole_id, stage):
@@ -703,6 +693,7 @@ def update_dropdowns(selected_hole_id):
     stages = get_unique_values('available_data', 'stage') if selected_hole_id else []
     
     return [{'label': id, 'value': id} for id in hole_ids], [{'label': stage, 'value': stage} for stage in stages]
+
 # Callback to display clicked point data
 @app.callback(
     Output('clicked-point-data', 'children'),
@@ -721,6 +712,7 @@ def display_click_data(clickData):
     lugeon = text_parts[4].split(': ')[1]
     
     return f"Flow: {flow} LPM, Effective Pressure: {eff_pressure} Bar, Gauge Pressure: {gauge_pressure} Bar, Lugeon: {lugeon}, Timestamp: {timestamp}"
+
 @app.callback(
     Output('stage-dropdown', 'options'),
     [Input('hole-id-dropdown', 'value')]
@@ -731,6 +723,7 @@ def update_stages(selected_hole_id):
         stages = get_unique_values('available_data', 'stage')
         return [{'label': stage, 'value': stage} for stage in stages]
     return []
+
 # Main callback to update graph and details
 @app.callback(
     [Output('upload-confirmation', 'children'),
@@ -845,15 +838,15 @@ def upload_to_database(n_clicks, contents, filename):
         try:
             df, _ = parse_contents(contents, filename)
             hole_id, stage, _ = extract_file_details(filename)
-            key = f"grouting_data:{hole_id}:{stage}"
-            redis_client.set(key, df.to_json(orient='records'))
-            redis_client.sadd("available_hole_ids", hole_id)
-            redis_client.sadd(f"available_stages:{hole_id}", stage)
+            store_processed_data(df, hole_id, stage)
+            store_available_data(hole_id, stage)
+            set_available_hole_ids_and_stages()
             return f"Data uploaded for {hole_id} {stage}"
         except Exception as e:
             print(f"Error uploading to database: {e}")
             return "Error uploading data"
     return "Upload to Database"
+
 def batch_upload_excel_files(folder_path):
     uploaded_files = []
     for filename in os.listdir(folder_path):
