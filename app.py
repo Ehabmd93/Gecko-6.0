@@ -621,17 +621,15 @@ app.layout = html.Div([
     html.Div(id='upload-confirmation', style={'marginTop': 10, 'color': 'green'}),
     html.Div(id='error-message', style={'marginTop': 10, 'color': 'red'}),
     
-    html.Button('Run Tool', id='run-tool-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20}),
+    html.Button('Run Tool', id='run-tool-button-1', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20}),
     html.Button('Load Data', id='load-data-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
     html.Button('Upload to Database', id='upload-db-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
     
-html.Div([
+    html.Div([
         html.Label('Folder Path for Batch Upload:'),
         dcc.Input(id='folder-path-input', type='text', placeholder="Enter folder path"),
         html.Button('Batch Upload', id='batch-upload-button', n_clicks=0)
     ], style={'marginTop': '20px', 'marginBottom': '20px'}),
-
-    html.Button('Run Tool', id='run-tool-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20}),
 
     dcc.Loading(
         id="loading",
@@ -745,7 +743,7 @@ def update_stages(selected_hole_id):
      Output('giv-operator-notes', 'children'),
      Output('processing-message', 'children')],
     [Input('upload-data', 'contents'),
-     Input('run-tool-button', 'n_clicks'),
+     Input('run-tool-button-1', 'n_clicks'),
      Input('load-data-button', 'n_clicks'),
      Input('hole-id-dropdown', 'value'),
      Input('stage-dropdown', 'value'),
@@ -784,7 +782,7 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, view_
             print(error_message)
             return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
 
-    elif trigger_id in ['run-tool-button', 'upload-data']:
+    elif trigger_id in ['run-tool-button-1', 'upload-data']:
         if contents is None:
             return "", "Error: No file uploaded. Please upload a file before running the tool.", dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
         
