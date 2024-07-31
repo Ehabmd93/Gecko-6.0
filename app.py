@@ -530,17 +530,12 @@ app.layout = html.Div([
         html.Div([
             html.Label('Hole ID'),
             dcc.Dropdown(id='hole-id-dropdown', placeholder="Select Hole ID")
-        ], style={'width': '30%', 'display': 'inline-block', 'marginRight': '2%'}),
+        ], style={'width': '45%', 'display': 'inline-block', 'marginRight': '10%'}),
         
         html.Div([
             html.Label('Stage'),
             dcc.Dropdown(id='stage-dropdown', placeholder="Select Stage")
-        ], style={'width': '30%', 'display': 'inline-block', 'marginRight': '2%'}),
-        
-        html.Div([
-            html.Label('Order'),
-            dcc.Dropdown(id='order-dropdown', placeholder="Select an Order")
-        ], style={'width': '30%', 'display': 'inline-block'}),
+        ], style={'width': '45%', 'display': 'inline-block'}),
     ], style={'marginBottom': '20px'}),
     
     html.Div([
@@ -582,12 +577,6 @@ app.layout = html.Div([
     html.Button('Load Data', id='load-data-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
     html.Button('Upload to Database', id='upload-db-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
     
-    html.Div([
-        html.Label('Folder Path for Batch Upload:'),
-        dcc.Input(id='folder-path-input', type='text', placeholder="Enter folder path"),
-        html.Button('Batch Upload', id='batch-upload-button', n_clicks=0)
-    ], style={'marginTop': '20px', 'marginBottom': '20px'}),
-
     dcc.Loading(
         id="loading",
         type="default",
