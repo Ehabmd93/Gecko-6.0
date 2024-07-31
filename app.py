@@ -100,11 +100,21 @@ metadata.create_all(engine)
 def set_available_hole_ids_and_stages():
     hole_ids = session.query(available_data.c.hole_id).distinct().all()
     stages = session.query(available_data.c.stage).distinct().all()
-    
-    redis_client.sadd("available_hole_ids", *[hole_id for hole_id, in hole_ids])
-    for hole_id, in hole_ids:
-        stage_list = session.query(available_data.c.stage).filter(available_data.c.hole_id == hole_id).all()
-        redis_client.sadd(f"available_stages:{hole_id}", *[stage for stage, in stage_list])
+
+    if hole_ids:
+        redis_client.sadd("available_hole_ids", *[hole_id for hole_id, in hole_ids])
+    else:
+        print("No hole_ids found.")
+
+    if stages:
+        for hole_id, in hole_ids:
+            stage_list = session.query(available_data.c.stage).filter(available_data.c.hole_id == hole_id).all()
+            if stage_list:
+                redis_client.sadd(f"available_stages:{hole_id}", *[stage for stage, in stage_list])
+            else:
+                print(f"No stages found for hole_id: {hole_id}")
+    else:
+        print("No stages found.")
 
 set_available_hole_ids_and_stages()
 
