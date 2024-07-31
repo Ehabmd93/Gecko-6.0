@@ -23,8 +23,8 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import QueuePool
 
 # Environment variables
-DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://your_database_url')
-REDIS_URL = os.environ.get('REDIS_URL', 'redis://your_redis_url')
+DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://qhbw_sql_user:EJyTGHeLljJ1TCXlLtWPYPtrGDDzOLpg@dpg-cqkb5dbqf0us73c6a0lg-a.oregon-postgres.render.com/qhbw_sql')
+REDIS_URL = os.environ.get('REDIS_URL', 'redis://red-cql0cgt6l47c73f0loh0:6379')
 
 # Initialize SQLAlchemy engine with connection pooling
 engine = create_engine(DATABASE_URL, poolclass=QueuePool, pool_size=10, max_overflow=20)
@@ -33,24 +33,6 @@ session = Session()
 
 # Initialize Redis client
 redis_client = redis.Redis.from_url(REDIS_URL)
-
-# Function to set available hole IDs and stages from the database
-def set_available_hole_ids_and_stages():
-    hole_ids = session.query(available_data.c.hole_id).distinct().all()
-    stages = session.query(available_data.c.stage).distinct().all()
-    
-    redis_client.sadd("available_hole_ids", *[hole_id for hole_id, in hole_ids])
-    for hole_id, in hole_ids:
-        stage_list = session.query(available_data.c.stage).filter(available_data.c.hole_id == hole_id).all()
-        redis_client.sadd(f"available_stages:{hole_id}", *[stage for stage, in stage_list])
-
-set_available_hole_ids_and_stages()
-
-print("Data loaded into Redis successfully!")
-
-# Initialize Dash app
-app = Dash(__name__, suppress_callback_exceptions=True)
-server = app.server
 
 # Define metadata
 metadata = MetaData()
@@ -113,6 +95,24 @@ available_data = Table(
 
 # Create tables if they don't exist
 metadata.create_all(engine)
+
+# Function to set available hole IDs and stages from the database
+def set_available_hole_ids_and_stages():
+    hole_ids = session.query(available_data.c.hole_id).distinct().all()
+    stages = session.query(available_data.c.stage).distinct().all()
+    
+    redis_client.sadd("available_hole_ids", *[hole_id for hole_id, in hole_ids])
+    for hole_id, in hole_ids:
+        stage_list = session.query(available_data.c.stage).filter(available_data.c.hole_id == hole_id).all()
+        redis_client.sadd(f"available_stages:{hole_id}", *[stage for stage, in stage_list])
+
+set_available_hole_ids_and_stages()
+
+print("Data loaded into Redis successfully!")
+
+# Initialize Dash app
+app = Dash(__name__, suppress_callback_exceptions=True)
+server = app.server
 
 # Function to get unique values with Redis caching
 @lru_cache(maxsize=None)
