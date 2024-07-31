@@ -127,13 +127,21 @@ server = app.server
 # Function to get unique values with Redis caching
 @lru_cache(maxsize=None)
 def get_unique_values(table_name, column_name):
-    if table_name == 'available_data' and column_name == 'hole_id':
-        return [id.decode() for id in redis_client.smembers("available_hole_ids")]
-    elif table_name == 'available_data' and column_name == 'stage':
-        hole_id = redis_client.get("current_hole_id")
-        if hole_id:
-            return [stage.decode() for stage in redis_client.smembers(f"available_stages:{hole_id.decode()}")]
-    return []
+    try:
+        with engine.connect() as connection:
+            if column_name == 'hole_id':
+                result = connection.execute(text("SELECT DISTINCT hole_id FROM processed_data"))
+                return [row[0] for row in result]
+            elif column_name == 'stage':
+                hole_id = request.args.get('hole_id')  # Assuming you're passing hole_id as a query parameter
+                if hole_id:
+                    result = connection.execute(text(f"SELECT DISTINCT stage FROM processed_data WHERE hole_id = :hole_id"), {"hole_id": hole_id})
+                    return [row[0] for row in result]
+                else:
+                    return []
+    except Exception as e:
+        print(f"Error getting unique values: {e}")
+        return []
 
 # Function to extract file details
 def extract_file_details(file_name):
@@ -697,11 +705,10 @@ app.layout = html.Div([
     [Input('hole-id-dropdown', 'value')]
 )
 def update_dropdowns(selected_hole_id):
-    hole_ids = get_unique_values('available_data', 'hole_id')
-    stages = get_unique_values('available_data', 'stage') if selected_hole_id else []
+    hole_ids = get_unique_values('processed_data', 'hole_id')
+    stages = get_unique_values('processed_data', 'stage') if selected_hole_id else []
     
     return [{'label': id, 'value': id} for id in hole_ids], [{'label': stage, 'value': stage} for stage in stages]
-
 # Callback to display clicked point data
 @app.callback(
     Output('clicked-point-data', 'children'),
