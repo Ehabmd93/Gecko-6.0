@@ -13,7 +13,6 @@ import io
 import datetime as dt
 import os
 import time
-import redis
 import json
 from functools import lru_cache
 
@@ -24,15 +23,11 @@ from sqlalchemy.pool import QueuePool
 
 # Environment variables
 DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://qhbw_sql_user:EJyTGHeLljJ1TCXlLtWPYPtrGDDzOLpg@dpg-cqkb5dbqf0us73c6a0lg-a.oregon-postgres.render.com/qhbw_sql')
-REDIS_URL = os.environ.get('REDIS_URL', 'redis://red-cql0cgt6l47c73f0loh0:6379')
 
 # Initialize SQLAlchemy engine with connection pooling
 engine = create_engine(DATABASE_URL, poolclass=QueuePool, pool_size=10, max_overflow=20)
 Session = sessionmaker(bind=engine)
 session = Session()
-
-# Initialize Redis client
-redis_client = redis.Redis.from_url(REDIS_URL)
 
 # Define metadata
 metadata = MetaData()
@@ -96,46 +91,33 @@ available_data = Table(
 # Create tables if they don't exist
 metadata.create_all(engine)
 
-# Function to set available hole IDs and stages from the database
-def set_available_hole_ids_and_stages():
-    hole_ids = session.query(available_data.c.hole_id).distinct().all()
-    stages = session.query(available_data.c.stage).distinct().all()
+def test_database_connection():
+    try:
+        with engine.connect() as connection:
+            result = connection.execute(text("SELECT 1"))
+            print("Database connection successful!")
+    except Exception as e:
+        print(f"Database connection failed: {e}")
 
-    if hole_ids:
-        redis_client.sadd("available_hole_ids", *[hole_id for hole_id, in hole_ids])
-    else:
-        print("No hole_ids found.")
-
-    if stages:
-        for hole_id, in hole_ids:
-            stage_list = session.query(available_data.c.stage).filter(available_data.c.hole_id == hole_id).all()
-            if stage_list:
-                redis_client.sadd(f"available_stages:{hole_id}", *[stage for stage, in stage_list])
-            else:
-                print(f"No stages found for hole_id: {hole_id}")
-    else:
-        print("No stages found.")
-
-set_available_hole_ids_and_stages()
-
-print("Data loaded into Redis successfully!")
+# Call this function at the start of your app
+test_database_connection()
 
 # Initialize Dash app
 app = Dash(__name__, suppress_callback_exceptions=True)
 server = app.server
 
-# Function to get unique values with Redis caching
-@lru_cache(maxsize=None)
-def get_unique_values(table_name, column_name):
+# Function to get unique values from the database
+def get_unique_values(table_name, column_name, hole_id=None):
     try:
         with engine.connect() as connection:
             if column_name == 'hole_id':
-                result = connection.execute(text("SELECT DISTINCT hole_id FROM processed_data"))
+                query = text("SELECT DISTINCT hole_id FROM processed_data")
+                result = connection.execute(query)
                 return [row[0] for row in result]
             elif column_name == 'stage':
-                hole_id = request.args.get('hole_id')  # Assuming you're passing hole_id as a query parameter
                 if hole_id:
-                    result = connection.execute(text(f"SELECT DISTINCT stage FROM processed_data WHERE hole_id = :hole_id"), {"hole_id": hole_id})
+                    query = text("SELECT DISTINCT stage FROM processed_data WHERE hole_id = :hole_id")
+                    result = connection.execute(query, {"hole_id": hole_id})
                     return [row[0] for row in result]
                 else:
                     return []
@@ -216,10 +198,6 @@ def store_processed_data(df, hole_id, stage):
             session.execute(insert_stmt)
         session.commit()
         print(f"Data for {hole_id} {stage} stored successfully.")
-        
-        # Invalidate cache
-        redis_client.delete(f"processed_data_hole_id_unique_values")
-        redis_client.delete(f"processed_data_stage_unique_values")
     except Exception as e:
         session.rollback()
         print(f"Error storing processed data: {e}")
@@ -235,47 +213,18 @@ def store_available_data(hole_id, stage):
         session.rollback()
         print(f"Error storing available data: {e}")
 
-# Function to store grouting summary into the database
-def store_grouting_summary(summary):
-    try:
-        insert_stmt = grouting_summary.insert().values(**summary)
-        session.execute(insert_stmt)
-        session.commit()
-        print(f"Grouting summary for {summary['hole_id']} {summary['stage']} stored successfully.")
-    except Exception as e:
-        session.rollback()
-        print(f"Error storing grouting summary: {e}")
-
 # Function to retrieve processed data from the database
 def retrieve_processed_data(hole_id, stage):
-    key = f"grouting_data:{hole_id}:{stage}"
-    data = redis_client.get(key)
-    if data:
-        return pd.DataFrame(json.loads(data))
-    return None
-
-# Function to retrieve grouting summary from the database
-def retrieve_grouting_summary(hole_id, stage):
     try:
-        select_stmt = grouting_summary.select().where(
-            (grouting_summary.c.hole_id == hole_id) & 
-            (grouting_summary.c.stage == stage)
+        select_stmt = processed_data.select().where(
+            (processed_data.c.hole_id == hole_id) & 
+            (processed_data.c.stage == stage)
         )
-        result = session.execute(select_stmt).fetchone()
-        return dict(result) if result else None
-    except Exception as e:
-        print(f"Error retrieving grouting summary: {e}")
-        return None
-
-# Function to retrieve available data from the database
-def retrieve_available_data():
-    try:
-        select_stmt = available_data.select()
         result = session.execute(select_stmt).fetchall()
-        return result
+        return pd.DataFrame(result)
     except Exception as e:
-        print(f"Error retrieving available data: {e}")
-        return []
+        print(f"Error retrieving processed data: {e}")
+        return None
 
 # Function to track mixes and marsh values
 def track_mixes_and_marsh_values(data):
@@ -706,9 +655,10 @@ app.layout = html.Div([
 )
 def update_dropdowns(selected_hole_id):
     hole_ids = get_unique_values('processed_data', 'hole_id')
-    stages = get_unique_values('processed_data', 'stage') if selected_hole_id else []
+    stages = get_unique_values('processed_data', 'stage', selected_hole_id) if selected_hole_id else []
     
     return [{'label': id, 'value': id} for id in hole_ids], [{'label': stage, 'value': stage} for stage in stages]
+
 # Callback to display clicked point data
 @app.callback(
     Output('clicked-point-data', 'children'),
@@ -727,17 +677,6 @@ def display_click_data(clickData):
     lugeon = text_parts[4].split(': ')[1]
     
     return f"Flow: {flow} LPM, Effective Pressure: {eff_pressure} Bar, Gauge Pressure: {gauge_pressure} Bar, Lugeon: {lugeon}, Timestamp: {timestamp}"
-
-@app.callback(
-    Output('stage-dropdown', 'options'),
-    [Input('hole-id-dropdown', 'value')]
-)
-def update_stages(selected_hole_id):
-    if selected_hole_id:
-        redis_client.set("current_hole_id", selected_hole_id)
-        stages = get_unique_values('available_data', 'stage')
-        return [{'label': stage, 'value': stage} for stage in stages]
-    return []
 
 # Main callback to update graph and details
 @app.callback(
@@ -761,72 +700,18 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, view_
     ctx = dash.callback_context
     trigger_id = ctx.triggered[0]['prop_id'].split('.')[0]
 
-    if trigger_id == 'load-data-button' and hole_id and stage:
+    if trigger_id == 'upload-data' and contents:
         try:
-            data = retrieve_processed_data(hole_id, stage)
-            if data is None or data.empty:
-                return "", "No data found for selected Hole ID and Stage", dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
-            
-            mixes_and_marsh = track_mixes_and_marsh_values(data)
-            fig, _, notes_data = generate_interactive_graph(data)
-            injection_details = update_injection_details(data, stage, hole_id)
-            mix_summary = html.Div([
-                html.P(f"Mix A: {mixes_and_marsh['Mix A']} times"),
-                html.P(f"Mix B: {mixes_and_marsh['Mix B']} times"),
-                html.P(f"Mix C: {mixes_and_marsh['Mix C']} times"),
-                html.P(f"Mix D: {mixes_and_marsh['Mix D']} times"),
-            ])
-            error_summary = html.Div([html.Span(error, style={'color': 'red'}) for error in mixes_and_marsh['Errors']] or "NA")
-            giv_operator_notes = html.Div([
-                html.H3("GIV Operator Notes:"),
-                html.Pre(update_notes_table(notes_data))
-            ])
-
-            return f"Data for {hole_id} {stage} loaded successfully", "", fig, injection_details, mix_summary, error_summary, giv_operator_notes, ""
-
-        except Exception as e:
-            error_message = f"Error loading data: {str(e)}"
-            print(error_message)
-            return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
-
-    elif trigger_id in ['run-tool-button-1', 'upload-data']:
-        if contents is None:
-            return "", "Error: No file uploaded. Please upload a file before running the tool.", dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
-        
-        try:
-            processing_message = "Hold on! Gecko is on it. Processing your data now! 🦎"
-            
-            time.sleep(2)
-            
             df, mixes_and_marsh = parse_contents(contents, filename)
             if df is None:
                 raise ValueError("Error parsing file contents")
 
-            if view_type == 'time_series':
-                fig, data, notes_data = generate_interactive_graph(df)
-            elif view_type == 'scatter':
-                fig = generate_scatter_plot(df)
-                data, notes_data = df, pd.DataFrame()
-            elif view_type == 'histogram':
-                fig = generate_histogram(df, 'flow')
-                data, notes_data = df, pd.DataFrame()
-            else:
-                raise ValueError("Unsupported view type")
-
-            if data is None:
-                raise ValueError("Error generating graph")
-
-            injection_details = update_injection_details(data, stage, hole_id)
-
+            fig, data, notes_data = generate_interactive_graph(df)
+            injection_details = update_injection_details(df, stage, hole_id)
             mix_summary = html.Div([
-                html.P(f"Mix A: {mixes_and_marsh['Mix A']} times"),
-                html.P(f"Mix B: {mixes_and_marsh['Mix B']} times"),
-                html.P(f"Mix C: {mixes_and_marsh['Mix C']} times"),
-                html.P(f"Mix D: {mixes_and_marsh['Mix D']} times"),
+                html.P(f"Mix {mix}: {count} times") for mix, count in mixes_and_marsh.items() if mix != 'Errors'
             ])
-
             error_summary = html.Div([html.Span(error, style={'color': 'red'}) for error in mixes_and_marsh['Errors']] or "NA")
-
             giv_operator_notes = html.Div([
                 html.H3("GIV Operator Notes:"),
                 html.Pre(update_notes_table(notes_data))
@@ -836,6 +721,30 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, view_
                     fig, injection_details, mix_summary, error_summary, giv_operator_notes, "")
         except Exception as e:
             error_message = f"Error processing file: {str(e)}"
+            print(error_message)
+            return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
+
+    elif trigger_id == 'load-data-button' and hole_id and stage:
+        try:
+            data = retrieve_processed_data(hole_id, stage)
+            if data is None or data.empty:
+                return "", "No data found for selected Hole ID and Stage", dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
+            
+            mixes_and_marsh = track_mixes_and_marsh_values(data)
+            fig, _, notes_data = generate_interactive_graph(data)
+            injection_details = update_injection_details(data, stage, hole_id)
+            mix_summary = html.Div([
+                html.P(f"Mix {mix}: {count} times") for mix, count in mixes_and_marsh.items() if mix != 'Errors'
+            ])
+            error_summary = html.Div([html.Span(error, style={'color': 'red'}) for error in mixes_and_marsh['Errors']] or "NA")
+            giv_operator_notes = html.Div([
+                html.H3("GIV Operator Notes:"),
+                html.Pre(update_notes_table(notes_data))
+            ])
+
+            return f"Data for {hole_id} {stage} loaded successfully", "", fig, injection_details, mix_summary, error_summary, giv_operator_notes, ""
+        except Exception as e:
+            error_message = f"Error loading data: {str(e)}"
             print(error_message)
             return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
 
@@ -855,30 +764,11 @@ def upload_to_database(n_clicks, contents, filename):
             hole_id, stage, _ = extract_file_details(filename)
             store_processed_data(df, hole_id, stage)
             store_available_data(hole_id, stage)
-            set_available_hole_ids_and_stages()
             return f"Data uploaded for {hole_id} {stage}"
         except Exception as e:
             print(f"Error uploading to database: {e}")
             return "Error uploading data"
     return "Upload to Database"
-
-def batch_upload_excel_files(folder_path):
-    uploaded_files = []
-    for filename in os.listdir(folder_path):
-        if filename.endswith('.xlsx'):
-            file_path = os.path.join(folder_path, filename)
-            try:
-                df = pd.read_excel(file_path, sheet_name='Raw Data')
-                cleaned_data = clean_data(df)
-                hole_id, stage, _ = extract_file_details(filename)
-                key = f"grouting_data:{hole_id}:{stage}"
-                redis_client.set(key, cleaned_data.to_json(orient='records'))
-                redis_client.sadd("available_hole_ids", hole_id)
-                redis_client.sadd(f"available_stages:{hole_id}", stage)
-                uploaded_files.append(f"{hole_id} {stage}")
-            except Exception as e:
-                print(f"Error uploading {filename}: {e}")
-    return uploaded_files
 
 # Callback for printing the report
 @app.callback(
@@ -994,19 +884,5 @@ def print_report(n_clicks, figure, injection_details, mix_summary, error_summary
 
     return 0
 
-# New batch upload callback
-
-@app.callback(
-    Output('upload-confirmation', 'children'),
-    [Input('batch-upload-button', 'n_clicks')],
-    [State('folder-path-input', 'value')]
-)
-def batch_upload(n_clicks, folder_path):
-    if n_clicks > 0 and folder_path:
-        uploaded_files = batch_upload_excel_files(folder_path)
-        return f"Uploaded {len(uploaded_files)} files: {', '.join(uploaded_files)}"
-    return ""
-
-# Existing code
 if __name__ == '__main__':
     app.run_server(debug=False)
