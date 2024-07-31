@@ -21,6 +21,15 @@ from sqlalchemy import create_engine, Table, Column, Integer, String, MetaData, 
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import QueuePool
 
+import logging
+
+logging.basicConfig(filename='app_errors.log', level=logging.ERROR, 
+                    format='%(asctime)s %(levelname)s: %(message)s')
+
+def log_error(message):
+    print(message)  # Print to console
+    logging.error(message)  # Log to file
+
 # Environment variables
 DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://qhbw_sql_user:EJyTGHeLljJ1TCXlLtWPYPtrGDDzOLpg@dpg-cqkb5dbqf0us73c6a0lg-a.oregon-postgres.render.com/qhbw_sql')
 
@@ -216,12 +225,19 @@ def store_available_data(hole_id, stage):
 # Function to retrieve processed data from the database
 def retrieve_processed_data(hole_id, stage):
     try:
-        select_stmt = processed_data.select().where(
-            (processed_data.c.hole_id == hole_id) & 
-            (processed_data.c.stage == stage)
-        )
-        result = session.execute(select_stmt).fetchall()
-        return pd.DataFrame(result)
+        with engine.connect() as connection:
+            query = text("""
+                SELECT * FROM processed_data 
+                WHERE hole_id = :hole_id AND stage = :stage
+                LIMIT 10000
+            """)
+            result = connection.execute(query, {"hole_id": hole_id, "stage": stage})
+            df = pd.DataFrame(result.fetchall())
+            if df.empty:
+                print(f"No data found for hole_id: {hole_id} and stage: {stage}")
+            else:
+                print(f"Retrieved {len(df)} rows for hole_id: {hole_id} and stage: {stage}")
+            return df
     except Exception as e:
         print(f"Error retrieving processed data: {e}")
         return None
@@ -715,10 +731,14 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, view_
 
     elif trigger_id == 'load-data-button' and hole_id and stage:
         try:
+            print(f"Attempting to load data for hole_id: {hole_id}, stage: {stage}")
             data = retrieve_processed_data(hole_id, stage)
             if data is None or data.empty:
-                return "", "No data found for selected Hole ID and Stage", dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
+                error_message = f"No data found for Hole ID: {hole_id} and Stage: {stage}"
+                print(error_message)
+                return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
             
+            print(f"Data retrieved successfully. Shape: {data.shape}")
             mixes_and_marsh = track_mixes_and_marsh_values(data)
             fig, _, notes_data = generate_interactive_graph(data)
             injection_details = update_injection_details(data, stage, hole_id)
@@ -738,7 +758,6 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, view_
             return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
 
     raise PreventUpdate
-
 # Callback for uploading data to the database
 @app.callback(
     Output('upload-db-button', 'children'),
