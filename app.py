@@ -17,7 +17,7 @@ import json
 from functools import lru_cache
 
 # SQLAlchemy imports
-from sqlalchemy import create_engine, Table, Column, Integer, String, MetaData, Float, TIMESTAMP, select, func, text
+from sqlalchemy import create_engine, Table, Column, Integer, String, MetaData, Float, TIMESTAMP, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import QueuePool
 
@@ -31,7 +31,7 @@ def log_error(message):
     logging.error(message)  # Log to file
 
 # Environment variables
-DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://qhbw_sql_user:EJyTGHeLljJ1TCXlLtWPYPtrGDDzOLpg@dpg-cqkb5dbqf0us73c6a0lg-a.oregon-postgres.render.com/qhbw_sql')
+DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://qhbw_sql_vx26_user:glwGtA9yoGUtBrow7YdM9Ps80xNkGQIL@dpg-cqli5h08fa8c73aurv40-a.oregon-postgres.render.com/qhbw_sql_vx26')
 
 # Initialize SQLAlchemy engine with connection pooling
 engine = create_engine(DATABASE_URL, poolclass=QueuePool, pool_size=10, max_overflow=20)
@@ -232,7 +232,7 @@ def retrieve_processed_data(hole_id, stage):
                 LIMIT 10000
             """)
             result = connection.execute(query, {"hole_id": hole_id, "stage": stage})
-            df = pd.DataFrame(result.fetchall())
+            df = pd.DataFrame(result.fetchall(), columns=result.keys())
             if df.empty:
                 print(f"No data found for hole_id: {hole_id} and stage: {stage}")
             else:
@@ -554,7 +554,7 @@ app.layout = html.Div([
         ], style={'width': '45%', 'display': 'inline-block'}),
     ], style={'marginBottom': '20px'}),
     
-    html.Div([
+        html.Div([
         html.Label('View Type'),
         dcc.RadioItems(
             id='view-type',
@@ -571,7 +571,7 @@ app.layout = html.Div([
     dcc.Upload(
         id='upload-data',
         children=html.Div([
-            'Click Here to upload and Analysis your RTM grouting data'
+            'Click Here to upload and analyze your RTM grouting data'
         ]),
         style={
             'width': '100%',
@@ -758,6 +758,7 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, view_
             return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
 
     raise PreventUpdate
+
 # Callback for uploading data to the database
 @app.callback(
     Output('upload-db-button', 'children'),
