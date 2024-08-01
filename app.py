@@ -17,7 +17,7 @@ import json
 from functools import lru_cache
 
 # SQLAlchemy imports
-from sqlalchemy import create_engine, Table, Column, Integer, String, MetaData, Float, TIMESTAMP, text
+from sqlalchemy import create_engine, Table, Column, Integer, String, MetaData, Float, TIMESTAMP, select, func, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import QueuePool
 
@@ -232,7 +232,7 @@ def retrieve_processed_data(hole_id, stage):
                 LIMIT 10000
             """)
             result = connection.execute(query, {"hole_id": hole_id, "stage": stage})
-            df = pd.DataFrame(result.fetchall(), columns=result.keys())
+            df = pd.DataFrame(result.fetchall())
             if df.empty:
                 print(f"No data found for hole_id: {hole_id} and stage: {stage}")
             else:
@@ -554,7 +554,7 @@ app.layout = html.Div([
         ], style={'width': '45%', 'display': 'inline-block'}),
     ], style={'marginBottom': '20px'}),
     
-        html.Div([
+    html.Div([
         html.Label('View Type'),
         dcc.RadioItems(
             id='view-type',
@@ -571,7 +571,7 @@ app.layout = html.Div([
     dcc.Upload(
         id='upload-data',
         children=html.Div([
-            'Click Here to upload and analyze your RTM grouting data'
+            'Click Here to upload and Analysis your RTM grouting data'
         ]),
         style={
             'width': '100%',
@@ -740,7 +740,16 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, view_
             
             print(f"Data retrieved successfully. Shape: {data.shape}")
             mixes_and_marsh = track_mixes_and_marsh_values(data)
-            fig, _, notes_data = generate_interactive_graph(data)
+            
+            if view_type == 'time_series':
+                fig, _, notes_data = generate_interactive_graph(data)
+            elif view_type == 'scatter':
+                fig = generate_scatter_plot(data)
+            elif view_type == 'histogram':
+                fig = generate_histogram(data, 'flow')  # You can change 'flow' to any other column
+            else:
+                fig = go.Figure()  # Empty figure if view type is not recognized
+            
             injection_details = update_injection_details(data, stage, hole_id)
             mix_summary = html.Div([
                 html.P(f"Mix {mix}: {count} times") for mix, count in mixes_and_marsh.items() if mix != 'Errors'
