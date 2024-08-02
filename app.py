@@ -239,9 +239,7 @@ def track_mixes_and_marsh_values(data):
         elif mix_num == 5 and current_mix == 'C':
             current_mix = 'D'
 
-    total_grouting_time = (data['TIMESTAMP'].iloc[-1] - data['TIMESTAMP'].iloc[0]).total_seconds() / 3600
     zero_flow_interval = calculate_cumulative_zero_flow(data)
-    net_grouting_time = total_grouting_time - zero_flow_interval
 
     return {
         'Mix A': mix_counts['A'],
@@ -332,7 +330,7 @@ def generate_interactive_graph(data):
             title='Flow Rate, Effective Pressure, and Grout Temperature vs Time for Mixes',
             yaxis=dict(title='Flow Rate (L/min)', side='left'),
             yaxis2=dict(title='Effective Pressure (bar)', overlaying='y', side='right'),
-            yaxis3=dict(title='Grout Temperature (°C)', overlaying='y', side='right', anchor='free', position=1.05),
+            yaxis3=dict(title='Grout Temperature (°C)', overlaying='y', side='right', anchor='free', position=1),
             hovermode='x unified'
         )
 
@@ -608,11 +606,10 @@ app.layout = html.Div([
                     'whiteSpace': 'normal'
                 }
             )
-        ], style={'width': '50%', 'display': 'inline-block', 'verticalAlign': 'top'}),
-        html.Div([
-            html.Div(id='injection-details')
-        ], style={'width': '50%', 'display': 'inline-block', 'verticalAlign': 'top', 'paddingLeft': '20px'})
+        ], style={'width': '100%', 'display': 'inline-block', 'verticalAlign': 'top'}),
     ], style={'display': 'flex', 'marginTop': '20px'}),
+
+    html.Div(id='injection-details', style={'marginTop': '20px'}),
     
     html.Div([
         html.H3("Mixes Count"),
