@@ -73,6 +73,30 @@ processed_data = Table(
     Column('Notes', String)
 )
 
+grouting_summary = Table(
+    'grouting_summary', metadata,
+    Column('id', Integer, primary_key=True),
+    Column('hole_id', String),
+    Column('stage', String),
+    Column('start_time', TIMESTAMP),
+    Column('end_time', TIMESTAMP),
+    Column('total_volume', Float),
+    Column('mix_a_volume', Float),
+    Column('mix_b_volume', Float),
+    Column('mix_c_volume', Float),
+    Column('mix_d_volume', Float),
+    Column('total_grouting_time', Float),
+    Column('net_grouting_time', Float)
+)
+
+available_data = Table(
+    'available_data', metadata,
+    Column('id', Integer, primary_key=True),
+    Column('hole_id', String),
+    Column('stage', String),
+    Column('upload_date', TIMESTAMP)
+)
+
 # Create tables if they don't exist
 metadata.create_all(engine)
 
@@ -92,32 +116,23 @@ app = Dash(__name__, suppress_callback_exceptions=True)
 server = app.server
 
 # Function to get unique values from the database
-def get_unique_values(column_name, hole_id=None):
+def get_unique_values(table_name, column_name, hole_id=None):
     try:
         with engine.connect() as connection:
             if column_name == 'hole_id':
                 query = text("SELECT DISTINCT hole_id FROM processed_data")
                 result = connection.execute(query)
-                hole_ids = [row[0] for row in result]
-                print(f"Hole IDs: {hole_ids}")  # Debugging statement
-                return hole_ids
-            elif column_name == 'stage' and hole_id:
-                query = text("SELECT DISTINCT stage FROM processed_data WHERE hole_id = :hole_id")
-                result = connection.execute(query, {"hole_id": hole_id})
-                stages = [row[0] for row in result]
-                print(f"Stages for {hole_id}: {stages}")  # Debugging statement
-                return stages
-            else:
-                query = text(f"SELECT DISTINCT {column_name} FROM processed_data")
-                result = connection.execute(query)
-                values = [row[0] for row in result]
-                print(f"{column_name} values: {values}")  # Debugging statement
-                return values
+                return [row[0] for row in result]
+            elif column_name == 'stage':
+                if hole_id:
+                    query = text("SELECT DISTINCT stage FROM processed_data WHERE hole_id = :hole_id")
+                    result = connection.execute(query, {"hole_id": hole_id})
+                    return [row[0] for row in result]
+                else:
+                    return []
     except Exception as e:
         print(f"Error getting unique values: {e}")
         return []
-
-
 
 # Function to extract file details
 def extract_file_details(file_name):
@@ -196,6 +211,17 @@ def store_processed_data(df, hole_id, stage):
         session.rollback()
         print(f"Error storing processed data: {e}")
 
+# Function to store available data into the database
+def store_available_data(hole_id, stage):
+    try:
+        insert_stmt = available_data.insert().values(hole_id=hole_id, stage=stage, upload_date=dt.datetime.now())
+        session.execute(insert_stmt)
+        session.commit()
+        print(f"Available data for {hole_id} {stage} stored successfully.")
+    except Exception as e:
+        session.rollback()
+        print(f"Error storing available data: {e}")
+
 # Function to retrieve processed data from the database
 def retrieve_processed_data(hole_id, stage):
     try:
@@ -203,27 +229,18 @@ def retrieve_processed_data(hole_id, stage):
             query = text("""
                 SELECT * FROM processed_data 
                 WHERE hole_id = :hole_id AND stage = :stage
-                ORDER BY "TIMESTAMP"
                 LIMIT 10000
             """)
             result = connection.execute(query, {"hole_id": hole_id, "stage": stage})
-            df = pd.DataFrame(result.fetchall(), columns=result.keys())
-            
+            df = pd.DataFrame(result.fetchall())
             if df.empty:
                 print(f"No data found for hole_id: {hole_id} and stage: {stage}")
             else:
                 print(f"Retrieved {len(df)} rows for hole_id: {hole_id} and stage: {stage}")
-                
-                # Clean the data
-                df['TIMESTAMP'] = pd.to_datetime(df['TIMESTAMP'], errors='coerce')
-                df = df.dropna(subset=['TIMESTAMP'])
-                df = df.drop_duplicates()
-                
             return df
     except Exception as e:
         print(f"Error retrieving processed data: {e}")
         return None
-
 
 # Function to track mixes and marsh values
 def track_mixes_and_marsh_values(data):
@@ -642,18 +659,10 @@ app.layout = html.Div([
     [Input('hole-id-dropdown', 'value')]
 )
 def update_dropdowns(selected_hole_id):
-    print(f"Selected Hole ID: {selected_hole_id}")  # Debugging statement
-    hole_ids = get_unique_values('hole_id')
-    stages = get_unique_values('stage', selected_hole_id) if selected_hole_id else []
+    hole_ids = get_unique_values('processed_data', 'hole_id')
+    stages = get_unique_values('processed_data', 'stage', selected_hole_id) if selected_hole_id else []
     
-    hole_id_options = [{'label': id, 'value': id} for id in hole_ids]
-    stage_options = [{'label': stage, 'value': stage} for stage in stages]
-    
-    print(f"Hole ID Options: {hole_id_options}")  # Debugging statement
-    print(f"Stage Options: {stage_options}")  # Debugging statement
-    
-    return hole_id_options, stage_options
-
+    return [{'label': id, 'value': id} for id in hole_ids], [{'label': stage, 'value': stage} for stage in stages]
 
 # Callback to display clicked point data
 @app.callback(
@@ -772,6 +781,7 @@ def upload_to_database(n_clicks, contents, filename):
             df, _ = parse_contents(contents, filename)
             hole_id, stage, _ = extract_file_details(filename)
             store_processed_data(df, hole_id, stage)
+            store_available_data(hole_id, stage)
             return f"Data uploaded for {hole_id} {stage}"
         except Exception as e:
             print(f"Error uploading to database: {e}")
