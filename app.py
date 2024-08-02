@@ -73,30 +73,6 @@ processed_data = Table(
     Column('Notes', String)
 )
 
-grouting_summary = Table(
-    'grouting_summary', metadata,
-    Column('id', Integer, primary_key=True),
-    Column('hole_id', String),
-    Column('stage', String),
-    Column('start_time', TIMESTAMP),
-    Column('end_time', TIMESTAMP),
-    Column('total_volume', Float),
-    Column('mix_a_volume', Float),
-    Column('mix_b_volume', Float),
-    Column('mix_c_volume', Float),
-    Column('mix_d_volume', Float),
-    Column('total_grouting_time', Float),
-    Column('net_grouting_time', Float)
-)
-
-available_data = Table(
-    'available_data', metadata,
-    Column('id', Integer, primary_key=True),
-    Column('hole_id', String),
-    Column('stage', String),
-    Column('upload_date', TIMESTAMP)
-)
-
 # Create tables if they don't exist
 metadata.create_all(engine)
 
@@ -111,21 +87,17 @@ def test_database_connection():
 # Call this function at the start of your app
 test_database_connection()
 
-# Initialize Dash app
-app = Dash(__name__, suppress_callback_exceptions=True)
-server = app.server
-
 # Function to get unique values from the database
 def get_unique_values(table_name, column_name, hole_id=None):
     try:
         with engine.connect() as connection:
             if column_name == 'hole_id':
-                query = text("SELECT DISTINCT hole_id FROM processed_data")
+                query = text("SELECT DISTINCT hole_id FROM processed_data ORDER BY hole_id")
                 result = connection.execute(query)
                 return [row[0] for row in result]
             elif column_name == 'stage':
                 if hole_id:
-                    query = text("SELECT DISTINCT stage FROM processed_data WHERE hole_id = :hole_id")
+                    query = text("SELECT DISTINCT stage FROM processed_data WHERE hole_id = :hole_id ORDER BY stage")
                     result = connection.execute(query, {"hole_id": hole_id})
                     return [row[0] for row in result]
                 else:
@@ -211,17 +183,6 @@ def store_processed_data(df, hole_id, stage):
         session.rollback()
         print(f"Error storing processed data: {e}")
 
-# Function to store available data into the database
-def store_available_data(hole_id, stage):
-    try:
-        insert_stmt = available_data.insert().values(hole_id=hole_id, stage=stage, upload_date=dt.datetime.now())
-        session.execute(insert_stmt)
-        session.commit()
-        print(f"Available data for {hole_id} {stage} stored successfully.")
-    except Exception as e:
-        session.rollback()
-        print(f"Error storing available data: {e}")
-
 # Function to retrieve processed data from the database
 def retrieve_processed_data(hole_id, stage):
     try:
@@ -229,7 +190,7 @@ def retrieve_processed_data(hole_id, stage):
             query = text("""
                 SELECT * FROM processed_data 
                 WHERE hole_id = :hole_id AND stage = :stage
-                LIMIT 10000
+                ORDER BY "TIMESTAMP"
             """)
             result = connection.execute(query, {"hole_id": hole_id, "stage": stage})
             df = pd.DataFrame(result.fetchall())
@@ -237,6 +198,16 @@ def retrieve_processed_data(hole_id, stage):
                 print(f"No data found for hole_id: {hole_id} and stage: {stage}")
             else:
                 print(f"Retrieved {len(df)} rows for hole_id: {hole_id} and stage: {stage}")
+                
+            # Convert columns to appropriate data types
+            float_columns = ['holeAngle', 'vmarshGrout', 'vmarshWater', 'RECORD', 'CumTimeMin', 'flow', 'AvgFlow', 'volume', 'gaugePressure', 'AvgGaugePressure', 'effPressure', 'AvgEffectivePressure', 'Lugeon', 'Batt_V', 'PTemp', 'holeNum', 'mixNum', 'waterTable', 'stageTop', 'stageBottom', 'gaugeHeight', 'waterDepth']
+            for col in float_columns:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+            
+            if 'TIMESTAMP' in df.columns:
+                df['TIMESTAMP'] = pd.to_datetime(df['TIMESTAMP'])
+            
             return df
     except Exception as e:
         print(f"Error retrieving processed data: {e}")
@@ -532,6 +503,10 @@ try:
 except FileNotFoundError:
     print("Logo file 'Lizard_Logo.jpg' not found. The app will run without the logo.")
 
+# Initialize Dash app
+app = Dash(__name__, suppress_callback_exceptions=True)
+server = app.server
+
 # Define the layout for the app
 app.layout = html.Div([
     html.Div([
@@ -781,7 +756,6 @@ def upload_to_database(n_clicks, contents, filename):
             df, _ = parse_contents(contents, filename)
             hole_id, stage, _ = extract_file_details(filename)
             store_processed_data(df, hole_id, stage)
-            store_available_data(hole_id, stage)
             return f"Data uploaded for {hole_id} {stage}"
         except Exception as e:
             print(f"Error uploading to database: {e}")
