@@ -300,9 +300,6 @@ def generate_interactive_graph(data):
                 add_trace(fig, mix_data, f'Flow Rate Mix {mix_labels[mix]}', 'flow', color)
                 add_trace(fig, mix_data, f'Effective Pressure Mix {mix_labels[mix]}', 'effPressure', 'green', yaxis='y2')
 
-        # Add grout temperature trace
-        add_trace(fig, data, 'Grout Temperature', 'PTemp', 'red', yaxis='y3')
-
         mix_changes = data[data['mixNum'].diff().abs() > 0]
         for _, row in mix_changes.iterrows():
             mix_change_min = (row['TIMESTAMP'] - start_time).total_seconds() / 60
@@ -327,17 +324,29 @@ def generate_interactive_graph(data):
         )
 
         fig.update_layout(
-            title='Flow Rate, Effective Pressure, and Grout Temperature vs Time for Mixes',
+            title='Flow Rate and Effective Pressure vs Time for Mixes',
             yaxis=dict(title='Flow Rate (L/min)', side='left'),
             yaxis2=dict(title='Effective Pressure (bar)', overlaying='y', side='right'),
-            yaxis3=dict(title='Grout Temperature (°C)', overlaying='y', side='right', anchor='free', position=1),
             hovermode='x unified'
         )
 
-        return fig, data, notes_data
+        # Create a separate temperature plot
+        temp_fig = go.Figure()
+        add_trace(temp_fig, data, 'Temperature', 'PTemp', 'red')
+        temp_fig.update_layout(
+            title='Temperature vs Time',
+            xaxis_title='Time Elapsed (Minutes)',
+            yaxis_title='Temperature (°C)'
+        )
+        temp_fig.update_xaxes(
+            tickvals=[(t - start_time).total_seconds() / 60 for t in time_ticks],
+            ticktext=[t.strftime('%H:%M') for t in time_ticks]
+        )
+
+        return fig, temp_fig, data, notes_data
     except Exception as e:
         print(f"Error generating interactive graph: {e}")
-        return None, None, None
+        return None, None, None, None
 
 # Helper function to add trace to figure
 def add_trace(fig, data, name, y_col, color, yaxis='y'):
@@ -347,7 +356,7 @@ def add_trace(fig, data, name, y_col, color, yaxis='y'):
         mode='lines+markers',
         name=name,
         line=dict(color=color),
-        text=[f"Time: {row['TIMESTAMP'].strftime('%H:%M')}, Flow: {row['flow']:.1f}, Eff Pressure: {row['effPressure']:.1f}, Gauge Pressure: {row['gaugePressure']:.1f}, Lugeon: {row['Lugeon']:.1f}, Volume: {row['volume']:.1f}, Temperature: {row['PTemp']:.1f}" 
+        text=[f"Time: {row['TIMESTAMP'].strftime('%H:%M')}, {name}: {row[y_col]:.1f}, Flow: {row['flow']:.1f}, Eff Pressure: {row['effPressure']:.1f}, Gauge Pressure: {row['gaugePressure']:.1f}, Lugeon: {row['Lugeon']:.1f}, Volume: {row['volume']:.1f}" 
               for _, row in data.iterrows()],
         hoverinfo='text',
         yaxis=yaxis
@@ -448,6 +457,9 @@ def update_injection_details(data, selected_stage, selected_hole_id):
         zero_flow_interval = calculate_cumulative_zero_flow(data)
         net_grouting_time = total_grouting_time - zero_flow_interval
 
+        water_depth = data['waterDepth'].iloc[2] if len(data) > 2 else None
+        v_marsh_water = data['vmarshWater'].iloc[2] if len(data) > 2 else None
+
         details = [
             html.H2("Grout Injection Summary"),
             html.B("Hole ID: "), html.Span(f"{selected_hole_id}", style={'color': 'red', 'font-weight': 'bold'}),
@@ -479,6 +491,10 @@ def update_injection_details(data, selected_stage, selected_hole_id):
             html.Br(),
             html.B("Cumulative Zero Flow: "), html.Span(f"{zero_flow_interval:.2f} hours", style={'color': 'red', 'font-weight': 'bold'}),
             html.Br(),
+            html.B("Water Table: "), html.Span(f"{water_depth:.2f} meters" if water_depth is not None else "N/A", style={'color': 'red', 'font-weight': 'bold'}),
+            html.Br(),
+            html.B("V water: "), html.Span(f"{v_marsh_water:.2f} {'(reported correctly)' if 25.6 <= v_marsh_water <= 26.8 else ''}" if v_marsh_water is not None else "N/A", style={'color': 'red', 'font-weight': 'bold'}),
+            html.Br(),
         ]
 
         return html.Div(details)
@@ -490,12 +506,12 @@ def update_injection_details(data, selected_stage, selected_hole_id):
 def update_notes_table(notes_data):
     try:
         if notes_data is None or notes_data.empty:
-            return "No notes available"
+            return ""
         comments = [f"{row['Timestamp']} - {row['Note']}" for _, row in notes_data.iterrows()]
         return "\n".join(comments)
     except Exception as e:
         print(f"Error updating notes table: {e}")
-        return "Error updating notes table"
+        return ""
 
 # Load and encode the Gecko logo
 encoded_logo = None
@@ -569,6 +585,7 @@ app.layout = html.Div([
     html.Button('Run Tool', id='run-tool-button-1', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20}),
     html.Button('Load Data', id='load-data-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
     html.Button('Upload to Database', id='upload-db-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
+    html.Button('Show Temperature', id='show-temperature-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
     
     dcc.Loading(
         id="loading",
@@ -576,6 +593,7 @@ app.layout = html.Div([
         children=[
             html.Div(id='processing-message', style={'textAlign': 'center', 'fontSize': '18px', 'marginTop': '20px'}),
             dcc.Graph(id='interactive-graph'),
+            dcc.Graph(id='temperature-graph', style={'display': 'none'}),
         ]
     ),
     
@@ -652,20 +670,20 @@ def display_click_data(clickData):
     point = clickData['points'][0]
     text_parts = point['text'].split(', ')
     timestamp = text_parts[0].split(': ')[1]
-    flow = text_parts[1].split(': ')[1]
-    eff_pressure = text_parts[2].split(': ')[1]
-    gauge_pressure = text_parts[3].split(': ')[1]
-    lugeon = text_parts[4].split(': ')[1]
-    volume = text_parts[5].split(': ')[1]
-    temperature = text_parts[6].split(': ')[1]
+    flow = text_parts[2].split(': ')[1]
+    eff_pressure = text_parts[3].split(': ')[1]
+    gauge_pressure = text_parts[4].split(': ')[1]
+    lugeon = text_parts[5].split(': ')[1]
+    volume = text_parts[6].split(': ')[1]
     
-    return f"Flow: {flow} LPM, Effective Pressure: {eff_pressure} Bar, Gauge Pressure: {gauge_pressure} Bar, Lugeon: {lugeon}, Volume: {volume} L, Temperature: {temperature}°C, Timestamp: {timestamp}"
+    return f"Flow: {flow}, Effective Pressure: {eff_pressure}, Gauge Pressure: {gauge_pressure}, Lugeon: {lugeon}, Volume: {volume}, Timestamp: {timestamp}"
 
 # Main callback to update graph and details
 @app.callback(
     [Output('upload-confirmation', 'children'),
      Output('error-message', 'children'),
      Output('interactive-graph', 'figure'),
+     Output('temperature-graph', 'figure'),
      Output('injection-details', 'children'),
      Output('mix-summary', 'children'),
      Output('error-summary', 'children'),
@@ -689,7 +707,7 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, view_
             if df is None:
                 raise ValueError("Error parsing file contents")
 
-            fig, data, notes_data = generate_interactive_graph(df)
+            fig, temp_fig, data, notes_data = generate_interactive_graph(df)
             injection_details = update_injection_details(df, stage, hole_id)
             mix_summary = html.Div([
                 html.P(f"Mix {mix}: {count} times") for mix, count in mixes_and_marsh.items() if mix not in ['Cumulative Zero Flow']
@@ -701,11 +719,11 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, view_
             ])
 
             return (f"File '{filename}' processed successfully", "",
-                    fig, injection_details, mix_summary, error_summary, giv_operator_notes, "")
+                    fig, temp_fig, injection_details, mix_summary, error_summary, giv_operator_notes, "")
         except Exception as e:
             error_message = f"Error processing file: {str(e)}"
             print(error_message)
-            return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
+            return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
 
     elif trigger_id == 'load-data-button' and hole_id and stage:
         try:
@@ -714,19 +732,22 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, view_
             if data is None or data.empty:
                 error_message = f"No data found for Hole ID: {hole_id} and Stage: {stage}"
                 print(error_message)
-                return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
+                return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
             
             print(f"Data retrieved successfully. Shape: {data.shape}")
             mixes_and_marsh = track_mixes_and_marsh_values(data)
             
             if view_type == 'time_series':
-                fig, _, notes_data = generate_interactive_graph(data)
+                fig, temp_fig, _, notes_data = generate_interactive_graph(data)
             elif view_type == 'scatter':
                 fig = generate_scatter_plot(data)
+                temp_fig = go.Figure()
             elif view_type == 'histogram':
-                fig = generate_histogram(data, 'flow')  # You can change 'flow' to any other column
+                fig = generate_histogram(data, 'flow')
+                temp_fig = go.Figure()
             else:
-                fig = go.Figure()  # Empty figure if view type is not recognized
+                fig = go.Figure()
+                temp_fig = go.Figure()
             
             injection_details = update_injection_details(data, stage, hole_id)
             mix_summary = html.Div([
@@ -738,11 +759,11 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, view_
                 html.Pre(update_notes_table(notes_data))
             ])
 
-            return f"Data for {hole_id} {stage} loaded successfully", "", fig, injection_details, mix_summary, error_summary, giv_operator_notes, ""
+            return f"Data for {hole_id} {stage} loaded successfully", "", fig, temp_fig, injection_details, mix_summary, error_summary, giv_operator_notes, ""
         except Exception as e:
             error_message = f"Error loading data: {str(e)}"
             print(error_message)
-            return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
+            return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
 
     raise PreventUpdate
 
@@ -765,11 +786,23 @@ def upload_to_database(n_clicks, contents, filename):
             return "Error uploading data"
     return "Upload to Database"
 
+# Callback to show/hide temperature graph
+@app.callback(
+    Output('temperature-graph', 'style'),
+    [Input('show-temperature-button', 'n_clicks')]
+)
+def toggle_temperature_graph(n_clicks):
+    if n_clicks % 2 == 0:
+        return {'display': 'none'}
+    else:
+        return {'display': 'block'}
+
 # Callback for printing the report
 @app.callback(
     Output('print-report-button', 'n_clicks'),
     Input('print-report-button', 'n_clicks'),
     [State('interactive-graph', 'figure'),
+     State('temperature-graph', 'figure'),
      State('injection-details', 'children'),
      State('mix-summary', 'children'),
      State('error-summary', 'children'),
@@ -777,11 +810,12 @@ def upload_to_database(n_clicks, contents, filename):
      State('recipe-table', 'data'),
      State('qc-by-input', 'value')]
 )
-def print_report(n_clicks, figure, injection_details, mix_summary, error_summary, giv_operator_notes, recipe_table_data, qc_by):
+def print_report(n_clicks, figure, temp_figure, injection_details, mix_summary, error_summary, giv_operator_notes, recipe_table_data, qc_by):
     if n_clicks > 0:
         try:
-            # Convert the figure to an HTML div
+            # Convert the figures to HTML divs
             plot_div = pio.to_html(figure, full_html=False)
+            temp_plot_div = pio.to_html(temp_figure, full_html=False)
 
             # Convert recipe table to HTML
             recipe_table_html = """
@@ -832,8 +866,12 @@ def print_report(n_clicks, figure, injection_details, mix_summary, error_summary
                 <body>
                     <h1>Gecko 1.0 - QHBW Grouting Data QC Tool Report</h1>
                     <div class="section">
-                        <h2>Interactive Graph</h2>
+                        <h2>Flow Rate and Effective Pressure Graph</h2>
                         {plot_div}
+                    </div>
+                    <div class="section">
+                        <h2>Temperature Graph</h2>
+                        {temp_plot_div}
                     </div>
                     <div class="section">
                         <h2>Recipe Table</h2>
