@@ -92,20 +92,22 @@ app = Dash(__name__, suppress_callback_exceptions=True)
 server = app.server
 
 # Function to get unique values from the database
-def get_unique_values(column_name):
+def get_unique_values(column_name, hole_id=None):
     try:
         with engine.connect() as connection:
             if column_name == 'hole_id':
                 query = text("SELECT DISTINCT hole_id FROM processed_data")
+            elif column_name == 'stage' and hole_id:
+                query = text("SELECT DISTINCT stage FROM processed_data WHERE hole_id = :hole_id")
+                result = connection.execute(query, {"hole_id": hole_id})
+            else:
+                query = text(f"SELECT DISTINCT {column_name} FROM processed_data")
                 result = connection.execute(query)
-                return [row[0] for row in result]
-            elif column_name == 'stage':
-                query = text("SELECT DISTINCT stage FROM processed_data")
-                result = connection.execute(query)
-                return [row[0] for row in result]
+            return [row[0] for row in result]
     except Exception as e:
         print(f"Error getting unique values: {e}")
         return []
+
 
 # Function to extract file details
 def extract_file_details(file_name):
@@ -191,18 +193,27 @@ def retrieve_processed_data(hole_id, stage):
             query = text("""
                 SELECT * FROM processed_data 
                 WHERE hole_id = :hole_id AND stage = :stage
+                ORDER BY "TIMESTAMP"
                 LIMIT 10000
             """)
             result = connection.execute(query, {"hole_id": hole_id, "stage": stage})
-            df = pd.DataFrame(result.fetchall())
+            df = pd.DataFrame(result.fetchall(), columns=result.keys())
+            
             if df.empty:
                 print(f"No data found for hole_id: {hole_id} and stage: {stage}")
             else:
                 print(f"Retrieved {len(df)} rows for hole_id: {hole_id} and stage: {stage}")
+                
+                # Clean the data
+                df['TIMESTAMP'] = pd.to_datetime(df['TIMESTAMP'], errors='coerce')
+                df = df.dropna(subset=['TIMESTAMP'])
+                df = df.drop_duplicates()
+                
             return df
     except Exception as e:
         print(f"Error retrieving processed data: {e}")
         return None
+
 
 # Function to track mixes and marsh values
 def track_mixes_and_marsh_values(data):
@@ -622,9 +633,10 @@ app.layout = html.Div([
 )
 def update_dropdowns(selected_hole_id):
     hole_ids = get_unique_values('hole_id')
-    stages = get_unique_values('stage') if selected_hole_id else []
+    stages = get_unique_values('stage', selected_hole_id) if selected_hole_id else []
     
     return [{'label': id, 'value': id} for id in hole_ids], [{'label': stage, 'value': stage} for stage in stages]
+
 
 # Callback to display clicked point data
 @app.callback(
