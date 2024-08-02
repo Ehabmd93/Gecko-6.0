@@ -281,7 +281,7 @@ def extract_notes(data):
 def generate_interactive_graph(data):
     try:
         if data is None or data.empty:
-            return None, None, None
+            return None, None, None, None, None
 
         marsh_changes = identify_marsh_changes(data)
         notes_data = extract_notes(data)
@@ -330,7 +330,7 @@ def generate_interactive_graph(data):
             hovermode='x unified'
         )
 
-        # Create a separate temperature plot
+        # Create temperature plot
         temp_fig = go.Figure()
         add_trace(temp_fig, data, 'Temperature', 'PTemp', 'red')
         temp_fig.update_layout(
@@ -343,10 +343,20 @@ def generate_interactive_graph(data):
             ticktext=[t.strftime('%H:%M') for t in time_ticks]
         )
 
-        return fig, temp_fig, data, notes_data
+        # Create scatter plot
+        scatter_fig = px.scatter(data, x='flow', y='effPressure', color='mixNum', 
+                                 labels={'flow': 'Flow Rate', 'effPressure': 'Effective Pressure', 'mixNum': 'Mix Number'},
+                                 title='Flow Rate vs Effective Pressure',
+                                 category_orders={'mixNum': [2, 3, 4, 5]},
+                                 color_discrete_map={2: 'blue', 3: 'cyan', 4: 'magenta', 5: 'orange'})
+
+        # Create histogram
+        hist_fig = px.histogram(data, x='flow', nbins=20, title='Distribution of Flow Rate')
+
+        return fig, temp_fig, scatter_fig, hist_fig, data, notes_data
     except Exception as e:
         print(f"Error generating interactive graph: {e}")
-        return None, None, None, None
+        return None, None, None, None, None, None
 
 # Helper function to add trace to figure
 def add_trace(fig, data, name, y_col, color, yaxis='y'):
@@ -361,28 +371,6 @@ def add_trace(fig, data, name, y_col, color, yaxis='y'):
         hoverinfo='text',
         yaxis=yaxis
     ))
-
-# Function to generate scatter plot
-def generate_scatter_plot(data):
-    try:
-        fig = px.scatter(data, x='flow', y='effPressure', color='mixNum', 
-                         labels={'flow': 'Flow Rate', 'effPressure': 'Effective Pressure', 'mixNum': 'Mix Number'},
-                         title='Flow Rate vs Effective Pressure',
-                         category_orders={'mixNum': [2, 3, 4, 5]},
-                         color_discrete_map={2: 'blue', 3: 'cyan', 4: 'magenta', 5: 'orange'})
-        return fig
-    except Exception as e:
-        print(f"Error generating scatter plot: {e}")
-        return None
-
-# Function to generate histogram
-def generate_histogram(data, column):
-    try:
-        fig = px.histogram(data, x=column, nbins=20, title=f'Distribution of {column}')
-        return fig
-    except Exception as e:
-        print(f"Error generating histogram: {e}")
-        return None
 
 # Function to calculate cumulative zero flow
 def calculate_cumulative_zero_flow(data):
@@ -547,20 +535,6 @@ app.layout = html.Div([
         ], style={'width': '45%', 'display': 'inline-block'}),
     ], style={'marginBottom': '20px'}),
     
-    html.Div([
-        html.Label('View Type'),
-        dcc.RadioItems(
-            id='view-type',
-            options=[
-                {'label': 'Time Series', 'value': 'time_series'},
-                {'label': 'Scatter Plot', 'value': 'scatter'},
-                {'label': 'Histogram', 'value': 'histogram'}
-            ],
-            value='time_series',
-            labelStyle={'display': 'inline-block', 'marginRight': '10px'}
-        )
-    ], style={'marginBottom': '20px'}),
-    
     dcc.Upload(
         id='upload-data',
         children=html.Div([
@@ -585,7 +559,9 @@ app.layout = html.Div([
     html.Button('Run Tool', id='run-tool-button-1', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20}),
     html.Button('Load Data', id='load-data-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
     html.Button('Upload to Database', id='upload-db-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
-    html.Button('Show Temperature', id='show-temperature-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
+    html.Button('Show/Hide Temperature', id='toggle-temperature-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
+    html.Button('Show/Hide Scatter Plot', id='toggle-scatter-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
+    html.Button('Show/Hide Histogram', id='toggle-histogram-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
     
     dcc.Loading(
         id="loading",
@@ -594,6 +570,8 @@ app.layout = html.Div([
             html.Div(id='processing-message', style={'textAlign': 'center', 'fontSize': '18px', 'marginTop': '20px'}),
             dcc.Graph(id='interactive-graph'),
             dcc.Graph(id='temperature-graph', style={'display': 'none'}),
+            dcc.Graph(id='scatter-plot', style={'display': 'none'}),
+            dcc.Graph(id='histogram', style={'display': 'none'}),
         ]
     ),
     
@@ -684,6 +662,8 @@ def display_click_data(clickData):
      Output('error-message', 'children'),
      Output('interactive-graph', 'figure'),
      Output('temperature-graph', 'figure'),
+     Output('scatter-plot', 'figure'),
+     Output('histogram', 'figure'),
      Output('injection-details', 'children'),
      Output('mix-summary', 'children'),
      Output('error-summary', 'children'),
@@ -693,11 +673,10 @@ def display_click_data(clickData):
      Input('run-tool-button-1', 'n_clicks'),
      Input('load-data-button', 'n_clicks'),
      Input('hole-id-dropdown', 'value'),
-     Input('stage-dropdown', 'value'),
-     Input('view-type', 'value')],
+     Input('stage-dropdown', 'value')],
     [State('upload-data', 'filename')]
 )
-def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, view_type, filename):
+def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filename):
     ctx = dash.callback_context
     trigger_id = ctx.triggered[0]['prop_id'].split('.')[0]
 
@@ -707,7 +686,7 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, view_
             if df is None:
                 raise ValueError("Error parsing file contents")
 
-            fig, temp_fig, data, notes_data = generate_interactive_graph(df)
+            fig, temp_fig, scatter_fig, hist_fig, data, notes_data = generate_interactive_graph(df)
             injection_details = update_injection_details(df, stage, hole_id)
             mix_summary = html.Div([
                 html.P(f"Mix {mix}: {count} times") for mix, count in mixes_and_marsh.items() if mix not in ['Cumulative Zero Flow']
@@ -716,14 +695,14 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, view_
             giv_operator_notes = html.Div([
                 html.H3("GIV Operator Notes:"),
                 html.Pre(update_notes_table(notes_data))
-            ])
+            ]) if not notes_data.empty else ""
 
             return (f"File '{filename}' processed successfully", "",
-                    fig, temp_fig, injection_details, mix_summary, error_summary, giv_operator_notes, "")
+                    fig, temp_fig, scatter_fig, hist_fig, injection_details, mix_summary, error_summary, giv_operator_notes, "")
         except Exception as e:
             error_message = f"Error processing file: {str(e)}"
             print(error_message)
-            return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
+            return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
 
     elif trigger_id == 'load-data-button' and hole_id and stage:
         try:
@@ -732,22 +711,12 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, view_
             if data is None or data.empty:
                 error_message = f"No data found for Hole ID: {hole_id} and Stage: {stage}"
                 print(error_message)
-                return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
+                return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
             
             print(f"Data retrieved successfully. Shape: {data.shape}")
             mixes_and_marsh = track_mixes_and_marsh_values(data)
             
-            if view_type == 'time_series':
-                fig, temp_fig, _, notes_data = generate_interactive_graph(data)
-            elif view_type == 'scatter':
-                fig = generate_scatter_plot(data)
-                temp_fig = go.Figure()
-            elif view_type == 'histogram':
-                fig = generate_histogram(data, 'flow')
-                temp_fig = go.Figure()
-            else:
-                fig = go.Figure()
-                temp_fig = go.Figure()
+            fig, temp_fig, scatter_fig, hist_fig, _, notes_data = generate_interactive_graph(data)
             
             injection_details = update_injection_details(data, stage, hole_id)
             mix_summary = html.Div([
@@ -757,13 +726,13 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, view_
             giv_operator_notes = html.Div([
                 html.H3("GIV Operator Notes:"),
                 html.Pre(update_notes_table(notes_data))
-            ])
+            ]) if not notes_data.empty else ""
 
-            return f"Data for {hole_id} {stage} loaded successfully", "", fig, temp_fig, injection_details, mix_summary, error_summary, giv_operator_notes, ""
+            return f"Data for {hole_id} {stage} loaded successfully", "", fig, temp_fig, scatter_fig, hist_fig, injection_details, mix_summary, error_summary, giv_operator_notes, ""
         except Exception as e:
             error_message = f"Error loading data: {str(e)}"
             print(error_message)
-            return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
+            return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
 
     raise PreventUpdate
 
@@ -786,16 +755,33 @@ def upload_to_database(n_clicks, contents, filename):
             return "Error uploading data"
     return "Upload to Database"
 
-# Callback to show/hide temperature graph
+# Callbacks to show/hide additional plots
 @app.callback(
     Output('temperature-graph', 'style'),
-    [Input('show-temperature-button', 'n_clicks')]
+    [Input('toggle-temperature-button', 'n_clicks')]
 )
 def toggle_temperature_graph(n_clicks):
-    if n_clicks % 2 == 0:
+    if n_clicks is None:
         return {'display': 'none'}
-    else:
-        return {'display': 'block'}
+    return {'display': 'block' if n_clicks % 2 == 1 else 'none'}
+
+@app.callback(
+    Output('scatter-plot', 'style'),
+    [Input('toggle-scatter-button', 'n_clicks')]
+)
+def toggle_scatter_plot(n_clicks):
+    if n_clicks is None:
+        return {'display': 'none'}
+    return {'display': 'block' if n_clicks % 2 == 1 else 'none'}
+
+@app.callback(
+    Output('histogram', 'style'),
+    [Input('toggle-histogram-button', 'n_clicks')]
+)
+def toggle_histogram(n_clicks):
+    if n_clicks is None:
+        return {'display': 'none'}
+    return {'display': 'block' if n_clicks % 2 == 1 else 'none'}
 
 # Callback for printing the report
 @app.callback(
@@ -803,6 +789,8 @@ def toggle_temperature_graph(n_clicks):
     Input('print-report-button', 'n_clicks'),
     [State('interactive-graph', 'figure'),
      State('temperature-graph', 'figure'),
+     State('scatter-plot', 'figure'),
+     State('histogram', 'figure'),
      State('injection-details', 'children'),
      State('mix-summary', 'children'),
      State('error-summary', 'children'),
@@ -810,14 +798,16 @@ def toggle_temperature_graph(n_clicks):
      State('recipe-table', 'data'),
      State('qc-by-input', 'value')]
 )
-def print_report(n_clicks, figure, temp_figure, injection_details, mix_summary, error_summary, giv_operator_notes, recipe_table_data, qc_by):
+def print_report(n_clicks, figure, temp_figure, scatter_figure, hist_figure, injection_details, mix_summary, error_summary, giv_operator_notes, recipe_table_data, qc_by):
     if n_clicks > 0:
         try:
             # Convert the figures to HTML divs
             plot_div = pio.to_html(figure, full_html=False)
             temp_plot_div = pio.to_html(temp_figure, full_html=False)
+            scatter_plot_div = pio.to_html(scatter_figure, full_html=False)
+            hist_plot_div = pio.to_html(hist_figure, full_html=False)
 
-            # Convert recipe table to HTML
+           # Convert recipe table to HTML
             recipe_table_html = """
             <table border="1">
                 <tr>
@@ -872,6 +862,14 @@ def print_report(n_clicks, figure, temp_figure, injection_details, mix_summary, 
                     <div class="section">
                         <h2>Temperature Graph</h2>
                         {temp_plot_div}
+                    </div>
+                    <div class="section">
+                        <h2>Scatter Plot: Flow Rate vs Effective Pressure</h2>
+                        {scatter_plot_div}
+                    </div>
+                    <div class="section">
+                        <h2>Histogram: Distribution of Flow Rate</h2>
+                        {hist_plot_div}
                     </div>
                     <div class="section">
                         <h2>Recipe Table</h2>
