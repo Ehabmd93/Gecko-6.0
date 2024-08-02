@@ -248,10 +248,7 @@ def track_mixes_and_marsh_values(data):
         'Mix B': mix_counts['B'],
         'Mix C': mix_counts['C'],
         'Mix D': mix_counts['D'],
-        'Total Grouting Time': total_grouting_time,
-        'Net Grouting Time': net_grouting_time,
-        'Cumulative Zero Flow': zero_flow_interval,
-        'Errors': error_list
+        'Cumulative Zero Flow': zero_flow_interval
     }
 
 # Function to identify marsh changes
@@ -271,6 +268,7 @@ def extract_notes(data):
             return pd.DataFrame(columns=['Timestamp', 'Note'])
 
         notes_data = data[['TIMESTAMP', 'Notes']].dropna(subset=['Notes'])
+        notes_data = notes_data[notes_data['Notes'].str.strip() != '']
         if notes_data.empty:
             return pd.DataFrame(columns=['Timestamp', 'Note'])
 
@@ -304,6 +302,9 @@ def generate_interactive_graph(data):
                 add_trace(fig, mix_data, f'Flow Rate Mix {mix_labels[mix]}', 'flow', color)
                 add_trace(fig, mix_data, f'Effective Pressure Mix {mix_labels[mix]}', 'effPressure', 'green', yaxis='y2')
 
+        # Add grout temperature trace
+        add_trace(fig, data, 'Grout Temperature', 'PTemp', 'red', yaxis='y3')
+
         mix_changes = data[data['mixNum'].diff().abs() > 0]
         for _, row in mix_changes.iterrows():
             mix_change_min = (row['TIMESTAMP'] - start_time).total_seconds() / 60
@@ -328,9 +329,10 @@ def generate_interactive_graph(data):
         )
 
         fig.update_layout(
-            title='Flow Rate and Effective Pressure vs Time for Mixes',
+            title='Flow Rate, Effective Pressure, and Grout Temperature vs Time for Mixes',
             yaxis=dict(title='Flow Rate (L/min)', side='left'),
             yaxis2=dict(title='Effective Pressure (bar)', overlaying='y', side='right'),
+            yaxis3=dict(title='Grout Temperature (°C)', overlaying='y', side='right', anchor='free', position=1.05),
             hovermode='x unified'
         )
 
@@ -347,7 +349,7 @@ def add_trace(fig, data, name, y_col, color, yaxis='y'):
         mode='lines+markers',
         name=name,
         line=dict(color=color),
-        text=[f"Time: {row['TIMESTAMP'].strftime('%H:%M')}, Flow: {row['flow']:.1f}, Eff Pressure: {row['effPressure']:.1f}, Gauge Pressure: {row['gaugePressure']:.1f}, Lugeon: {row['Lugeon']:.1f}, Volume: {row['volume']:.1f}" 
+        text=[f"Time: {row['TIMESTAMP'].strftime('%H:%M')}, Flow: {row['flow']:.1f}, Eff Pressure: {row['effPressure']:.1f}, Gauge Pressure: {row['gaugePressure']:.1f}, Lugeon: {row['Lugeon']:.1f}, Volume: {row['volume']:.1f}, Temperature: {row['PTemp']:.1f}" 
               for _, row in data.iterrows()],
         hoverinfo='text',
         yaxis=yaxis
@@ -476,6 +478,8 @@ def update_injection_details(data, selected_stage, selected_hole_id):
             html.B("Total Grouting Time: "), html.Span(f"{total_grouting_time:.2f} hours", style={'color': 'red', 'font-weight': 'bold'}),
             html.Br(),
             html.B("Net Grouting Time: "), html.Span(f"{net_grouting_time:.2f} hours", style={'color': 'red', 'font-weight': 'bold'}),
+            html.Br(),
+            html.B("Cumulative Zero Flow: "), html.Span(f"{zero_flow_interval:.2f} hours", style={'color': 'red', 'font-weight': 'bold'}),
             html.Br(),
         ]
 
@@ -655,8 +659,10 @@ def display_click_data(clickData):
     eff_pressure = text_parts[2].split(': ')[1]
     gauge_pressure = text_parts[3].split(': ')[1]
     lugeon = text_parts[4].split(': ')[1]
+    volume = text_parts[5].split(': ')[1]
+    temperature = text_parts[6].split(': ')[1]
     
-    return f"Flow: {flow} LPM, Effective Pressure: {eff_pressure} Bar, Gauge Pressure: {gauge_pressure} Bar, Lugeon: {lugeon}, Timestamp: {timestamp}"
+    return f"Flow: {flow} LPM, Effective Pressure: {eff_pressure} Bar, Gauge Pressure: {gauge_pressure} Bar, Lugeon: {lugeon}, Volume: {volume} L, Temperature: {temperature}°C, Timestamp: {timestamp}"
 
 # Main callback to update graph and details
 @app.callback(
@@ -689,9 +695,9 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, view_
             fig, data, notes_data = generate_interactive_graph(df)
             injection_details = update_injection_details(df, stage, hole_id)
             mix_summary = html.Div([
-                html.P(f"Mix {mix}: {count} times") for mix, count in mixes_and_marsh.items() if mix != 'Errors'
+                html.P(f"Mix {mix}: {count} times") for mix, count in mixes_and_marsh.items() if mix not in ['Cumulative Zero Flow']
             ])
-            error_summary = html.Div([html.Span(error, style={'color': 'red'}) for error in mixes_and_marsh['Errors']] or "NA")
+            error_summary = html.Div([html.Span(error, style={'color': 'red'}) for error in mixes_and_marsh.get('Errors', [])] or "NA")
             giv_operator_notes = html.Div([
                 html.H3("GIV Operator Notes:"),
                 html.Pre(update_notes_table(notes_data))
@@ -727,9 +733,9 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, view_
             
             injection_details = update_injection_details(data, stage, hole_id)
             mix_summary = html.Div([
-                html.P(f"Mix {mix}: {count} times") for mix, count in mixes_and_marsh.items() if mix != 'Errors'
+                html.P(f"Mix {mix}: {count} times") for mix, count in mixes_and_marsh.items() if mix not in ['Cumulative Zero Flow']
             ])
-            error_summary = html.Div([html.Span(error, style={'color': 'red'}) for error in mixes_and_marsh['Errors']] or "NA")
+            error_summary = html.Div([html.Span(error, style={'color': 'red'}) for error in mixes_and_marsh.get('Errors', [])] or "NA")
             giv_operator_notes = html.Div([
                 html.H3("GIV Operator Notes:"),
                 html.Pre(update_notes_table(notes_data))
@@ -833,16 +839,16 @@ def print_report(n_clicks, figure, injection_details, mix_summary, error_summary
                         {plot_div}
                     </div>
                     <div class="section">
-                        <h2>Injection Details</h2>
+                        <h2>Recipe Table</h2>
+                        {recipe_table_html}
+                    </div>
+                    <div class="section">
+                        <h2>Grout Injection Summary</h2>
                         <div class="details">{injection_details}</div>
                     </div>
                     <div class="section">
                         <h2>Mix Summary</h2>
                         <div class="details">{mix_summary}</div>
-                    </div>
-                    <div class="section">
-                        <h2>Recipe Table</h2>
-                        {recipe_table_html}
                     </div>
                     <div class="section">
                         <h2>Observations/Errors</h2>
