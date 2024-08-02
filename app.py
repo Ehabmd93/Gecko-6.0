@@ -97,16 +97,26 @@ def get_unique_values(column_name, hole_id=None):
         with engine.connect() as connection:
             if column_name == 'hole_id':
                 query = text("SELECT DISTINCT hole_id FROM processed_data")
+                result = connection.execute(query)
+                hole_ids = [row[0] for row in result]
+                print(f"Hole IDs: {hole_ids}")  # Debugging statement
+                return hole_ids
             elif column_name == 'stage' and hole_id:
                 query = text("SELECT DISTINCT stage FROM processed_data WHERE hole_id = :hole_id")
                 result = connection.execute(query, {"hole_id": hole_id})
+                stages = [row[0] for row in result]
+                print(f"Stages for {hole_id}: {stages}")  # Debugging statement
+                return stages
             else:
                 query = text(f"SELECT DISTINCT {column_name} FROM processed_data")
                 result = connection.execute(query)
-            return [row[0] for row in result]
+                values = [row[0] for row in result]
+                print(f"{column_name} values: {values}")  # Debugging statement
+                return values
     except Exception as e:
         print(f"Error getting unique values: {e}")
         return []
+
 
 
 # Function to extract file details
@@ -632,10 +642,17 @@ app.layout = html.Div([
     [Input('hole-id-dropdown', 'value')]
 )
 def update_dropdowns(selected_hole_id):
+    print(f"Selected Hole ID: {selected_hole_id}")  # Debugging statement
     hole_ids = get_unique_values('hole_id')
     stages = get_unique_values('stage', selected_hole_id) if selected_hole_id else []
     
-    return [{'label': id, 'value': id} for id in hole_ids], [{'label': stage, 'value': stage} for stage in stages]
+    hole_id_options = [{'label': id, 'value': id} for id in hole_ids]
+    stage_options = [{'label': stage, 'value': stage} for stage in stages]
+    
+    print(f"Hole ID Options: {hole_id_options}")  # Debugging statement
+    print(f"Stage Options: {stage_options}")  # Debugging statement
+    
+    return hole_id_options, stage_options
 
 
 # Callback to display clicked point data
