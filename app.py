@@ -34,9 +34,7 @@ def log_error(message):
 DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://qhbw_sql_vx26_user:glwGtA9yoGUtBrow7YdM9Ps80xNkGQIL@dpg-cqli5h08fa8c73aurv40-a.oregon-postgres.render.com/qhbw_sql_vx26')
 
 # Initialize SQLAlchemy engine with connection pooling
-engine = create_engine(DATABASE_URL, poolclass=QueuePool, pool_size=10, max_overflow=20)
-Session = sessionmaker(bind=engine)
-session = Session()
+engine = create_engine(DATABASE_URL, poolclass=QueuePool, pool_size=5, max_overflow=10, pool_pre_ping=True)
 
 # Define metadata
 metadata = MetaData()
@@ -76,18 +74,7 @@ processed_data = Table(
 # Create tables if they don't exist
 metadata.create_all(engine)
 
-def test_database_connection():
-    try:
-        with engine.connect() as connection:
-            result = connection.execute(text("SELECT 1"))
-            print("Database connection successful!")
-    except Exception as e:
-        print(f"Database connection failed: {e}")
-
-# Call this function at the start of your app
-test_database_connection()
-
-# Function to get unique values from the database
+@lru_cache(maxsize=None)
 def get_unique_values(table_name, column_name, hole_id=None):
     try:
         with engine.connect() as connection:
@@ -103,10 +90,9 @@ def get_unique_values(table_name, column_name, hole_id=None):
                 else:
                     return []
     except Exception as e:
-        print(f"Error getting unique values: {e}")
+        log_error(f"Error getting unique values: {e}")
         return []
 
-# Function to extract file details
 def extract_file_details(file_name):
     try:
         pattern = r'([PS]\d{4})_(S\d+(?:&\d+)?)'
@@ -116,10 +102,9 @@ def extract_file_details(file_name):
             order = 'P' if hole_id.startswith('P') else 'S'
             return hole_id, stage, order
     except Exception as e:
-        print(f"Error extracting file details from {file_name}: {e}")
+        log_error(f"Error extracting file details from {file_name}: {e}")
     return None, None, None
 
-# Function to clean data
 def clean_data(data):
     try:
         headers = [
@@ -129,10 +114,9 @@ def clean_data(data):
             'waterDepth', 'holeAngle', 'vmarshGrout', 'vmarshWater', 'Notes'
         ]
         
-        data = data.drop([0, 1, 2])
+        data = data.drop([0, 1, 2]).reset_index(drop=True)
         data.columns = headers
         data = data.drop(data.index[0])
-        data = data.reset_index(drop=True)
 
         data['TIMESTAMP'] = pd.to_datetime(data['TIMESTAMP'], errors='coerce')
         data = data.dropna(subset=['TIMESTAMP'])
@@ -141,16 +125,13 @@ def clean_data(data):
                            'effPressure', 'AvgEffectivePressure', 'Lugeon', 'Batt_V', 'PTemp', 
                            'holeNum', 'mixNum', 'waterTable', 'stageTop', 'stageBottom', 
                            'gaugeHeight', 'waterDepth', 'holeAngle', 'vmarshGrout', 'vmarshWater']
-        for col in numeric_columns:
-            if col in data.columns:
-                data[col] = pd.to_numeric(data[col], errors='coerce')
+        data[numeric_columns] = data[numeric_columns].apply(pd.to_numeric, errors='coerce')
 
         return data
     except Exception as e:
-        print(f"Error cleaning data: {e}")
+        log_error(f"Error cleaning data: {e}")
         return None
 
-# Function to parse file contents
 def parse_contents(contents, filename):
     content_type, content_string = contents.split(',')
     decoded = base64.b64decode(content_string)
@@ -165,25 +146,22 @@ def parse_contents(contents, filename):
         mixes_and_marsh = track_mixes_and_marsh_values(cleaned_data)
         return cleaned_data, mixes_and_marsh
     except Exception as e:
-        print(f"Error parsing file: {e}")
+        log_error(f"Error parsing file: {e}")
         return None, None
 
-# Function to store processed data into the database
 def store_processed_data(df, hole_id, stage):
     try:
-        records = df.to_dict(orient='records')
-        for record in records:
-            record['hole_id'] = hole_id
-            record['stage'] = stage
-            insert_stmt = processed_data.insert().values(**record)
-            session.execute(insert_stmt)
-        session.commit()
+        with engine.begin() as connection:
+            records = df.to_dict(orient='records')
+            for record in records:
+                record['hole_id'] = hole_id
+                record['stage'] = stage
+                insert_stmt = processed_data.insert().values(**record)
+                connection.execute(insert_stmt)
         print(f"Data for {hole_id} {stage} stored successfully.")
     except Exception as e:
-        session.rollback()
-        print(f"Error storing processed data: {e}")
+        log_error(f"Error storing processed data: {e}")
 
-# Function to retrieve processed data from the database
 def retrieve_processed_data(hole_id, stage):
     try:
         with engine.connect() as connection:
@@ -199,29 +177,23 @@ def retrieve_processed_data(hole_id, stage):
             else:
                 print(f"Retrieved {len(df)} rows for hole_id: {hole_id} and stage: {stage}")
                 
-            # Convert columns to appropriate data types
             float_columns = ['holeAngle', 'vmarshGrout', 'vmarshWater', 'RECORD', 'CumTimeMin', 'flow', 'AvgFlow', 'volume', 'gaugePressure', 'AvgGaugePressure', 'effPressure', 'AvgEffectivePressure', 'Lugeon', 'Batt_V', 'PTemp', 'holeNum', 'mixNum', 'waterTable', 'stageTop', 'stageBottom', 'gaugeHeight', 'waterDepth']
-            for col in float_columns:
-                if col in df.columns:
-                    df[col] = pd.to_numeric(df[col], errors='coerce')
+            df[float_columns] = df[float_columns].apply(pd.to_numeric, errors='coerce')
             
             if 'TIMESTAMP' in df.columns:
                 df['TIMESTAMP'] = pd.to_datetime(df['TIMESTAMP'])
             
             return df
     except Exception as e:
-        print(f"Error retrieving processed data: {e}")
+        log_error(f"Error retrieving processed data: {e}")
         return None
 
-# Function to track mixes and marsh values
 def track_mixes_and_marsh_values(data):
     mix_counts = {'A': 0, 'B': 0, 'C': 0, 'D': 0}
     marsh_values = {'A': None, 'B': None, 'C': None, 'D': None}
-    error_list = []
     current_mix = 'A'
 
-    for i, row in data.iterrows():
-        timestamp = row['TIMESTAMP']
+    for _, row in data.iterrows():
         mix_num = row['mixNum']
         marsh_value = row['vmarshGrout']
 
@@ -249,17 +221,14 @@ def track_mixes_and_marsh_values(data):
         'Cumulative Zero Flow': zero_flow_interval
     }
 
-# Function to identify marsh changes
 def identify_marsh_changes(data):
     try:
         marsh_changes = data[data['vmarshGrout'].diff() != 0]
-        marsh_changes = marsh_changes[['TIMESTAMP', 'mixNum', 'vmarshGrout', 'flow']]
-        return marsh_changes
+        return marsh_changes[['TIMESTAMP', 'mixNum', 'vmarshGrout', 'flow']]
     except Exception as e:
-        print(f"Error identifying Marsh changes: {e}")
+        log_error(f"Error identifying Marsh changes: {e}")
         return pd.DataFrame(columns=['TIMESTAMP', 'mixNum', 'vmarshGrout', 'flow'])
 
-# Function to extract notes
 def extract_notes(data):
     try:
         if 'Notes' not in data.columns:
@@ -274,14 +243,13 @@ def extract_notes(data):
         notes_data['Timestamp'] = pd.to_datetime(notes_data['Timestamp']).dt.strftime('%H:%M')
         return notes_data
     except Exception as e:
-        print(f"Error extracting notes: {e}")
+        log_error(f"Error extracting notes: {e}")
         return pd.DataFrame(columns=['Timestamp', 'Note'])
 
-# Function to generate interactive graph
 def generate_interactive_graph(data):
     try:
         if data is None or data.empty:
-            return None, None, None, None, None, None
+            return None, None, None, None, None, None, None
 
         marsh_changes = identify_marsh_changes(data)
         notes_data = extract_notes(data)
@@ -385,10 +353,9 @@ def generate_interactive_graph(data):
 
         return fig, temp_fig, scatter_3d_fig, pie_fig, bubble_fig, data, notes_data
     except Exception as e:
-        print(f"Error generating interactive graph: {e}")
+        log_error(f"Error generating interactive graph: {e}")
         return None, None, None, None, None, None, None
 
-# New function to generate bubble chart
 def generate_bubble_chart(data):
     try:
         fig = px.scatter(data, x='ElapsedMinutes', y='flow', size='effPressure', color='mixNum',
@@ -406,10 +373,9 @@ def generate_bubble_chart(data):
         
         return fig
     except Exception as e:
-        print(f"Error generating bubble chart: {e}")
+        log_error(f"Error generating bubble chart: {e}")
         return None
 
-# Helper function to add trace to figure
 def add_trace(fig, data, name, y_col, color, yaxis='y'):
     fig.add_trace(go.Scatter(
         x=data['ElapsedMinutes'],
@@ -423,7 +389,6 @@ def add_trace(fig, data, name, y_col, color, yaxis='y'):
         yaxis=yaxis
     ))
 
-# Function to calculate cumulative zero flow
 def calculate_cumulative_zero_flow(data):
     try:
         zero_flow_intervals = []
@@ -443,10 +408,9 @@ def calculate_cumulative_zero_flow(data):
         cumulative_zero_flow = sum(zero_flow_intervals) / 60  # in hours
         return cumulative_zero_flow
     except Exception as e:
-        print(f"Error calculating cumulative zero flow: {e}")
+        log_error(f"Error calculating cumulative zero flow: {e}")
         return 0
 
-# Function to calculate grout and mix volumes
 def calculate_grout_and_mix_volumes(data):
     try:
         cumulative_grout = data['volume'].iloc[-1]
@@ -472,10 +436,9 @@ def calculate_grout_and_mix_volumes(data):
 
         return mix_a_volume, mix_b_volume, mix_c_volume, mix_d_volume, cumulative_grout
     except Exception as e:
-        print(f"Error calculating grout and mix volumes: {e}")
+        log_error(f"Error calculating grout and mix volumes: {e}")
         return 0, 0, 0, 0, 0
 
-# Function to update injection details
 def update_injection_details(data, selected_stage, selected_hole_id):
     try:
         non_zero_flow = data[data['flow'] > 0]
@@ -540,10 +503,9 @@ def update_injection_details(data, selected_stage, selected_hole_id):
 
         return html.Div(details)
     except Exception as e:
-        print(f"Error updating injection details: {e}")
+        log_error(f"Error updating injection details: {e}")
         return "Error updating injection details"
 
-# Function to update notes table
 def update_notes_table(notes_data):
     try:
         if notes_data is None or notes_data.empty:
@@ -551,10 +513,9 @@ def update_notes_table(notes_data):
         comments = [f"{row['Timestamp']} - {row['Note']}" for _, row in notes_data.iterrows() if pd.notna(row['Note'])]
         return "\n".join(comments)
     except Exception as e:
-        print(f"Error updating notes table: {e}")
+        log_error(f"Error updating notes table: {e}")
         return ""
 
-# Function to apply Triangular Moving Average
 def apply_tma(data, window_size=5):
     weights = np.arange(1, window_size + 1)
     weights = np.concatenate([weights, weights[:-1][::-1]])
@@ -622,7 +583,7 @@ app.layout = html.Div([
     html.Div(id='upload-confirmation', style={'marginTop': 10, 'color': 'green'}),
     html.Div(id='error-message', style={'marginTop': 10, 'color': 'red'}),
     
-    html.Button('Run Tool', id='run-tool-button-1', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20}),
+    html.Button('Run Tool', id='run-tool-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20}),
     html.Button('Load Data', id='load-data-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
     html.Button('Upload to Database (Admin only)', id='upload-db-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}, disabled=True),
     html.Button('Show/Hide Temperature', id='toggle-temperature-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
@@ -742,7 +703,7 @@ def display_click_data(clickData):
      Output('giv-operator-notes', 'children'),
      Output('processing-message', 'children')],
     [Input('upload-data', 'contents'),
-     Input('run-tool-button-1', 'n_clicks'),
+     Input('run-tool-button', 'n_clicks'),
      Input('load-data-button', 'n_clicks'),
      Input('hole-id-dropdown', 'value'),
      Input('stage-dropdown', 'value')],
@@ -795,7 +756,7 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
                     fig, temp_fig, scatter_3d_fig, pie_fig, ma_fig, bubble_fig, injection_details, mix_summary, error_summary, giv_operator_notes, "")
         except Exception as e:
             error_message = f"Error processing file: {str(e)}"
-            print(error_message)
+            log_error(error_message)
             return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
 
     elif trigger_id == 'load-data-button' and hole_id and stage:
@@ -804,7 +765,7 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
             data = retrieve_processed_data(hole_id, stage)
             if data is None or data.empty:
                 error_message = f"No data found for Hole ID: {hole_id} and Stage: {stage}"
-                print(error_message)
+                log_error(error_message)
                 return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
             
             print(f"Data retrieved successfully. Shape: {data.shape}")
@@ -846,7 +807,7 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
             return f"Data for {hole_id} {stage} loaded successfully", "", fig, temp_fig, scatter_3d_fig, pie_fig, ma_fig, bubble_fig, injection_details, mix_summary, error_summary, giv_operator_notes, ""
         except Exception as e:
             error_message = f"Error loading data: {str(e)}"
-            print(error_message)
+            log_error(error_message)
             return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
 
     raise PreventUpdate
@@ -1049,7 +1010,7 @@ def print_report(n_clicks, figure, temp_figure, scatter_3d_figure, pie_figure, m
             print(f"HTML report generated and opened: {output_path}")
 
         except Exception as e:
-            print(f"Error generating report: {e}")
+            log_error(f"Error generating report: {e}")
 
     return 0
 
