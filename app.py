@@ -385,6 +385,40 @@ def generate_interactive_graph(data):
         print(f"Error generating interactive graph: {e}")
         return None, None, None, None, None, None
 
+# Function to generate bubble chart
+def generate_bubble_chart(data):
+    if data is None or data.empty:
+        return go.Figure()
+
+    # Ensure 'TIMESTAMP' is in datetime format
+    data['TIMESTAMP'] = pd.to_datetime(data['TIMESTAMP'])
+    
+    # Calculate elapsed time in minutes
+    data['ElapsedMinutes'] = (data['TIMESTAMP'] - data['TIMESTAMP'].min()).dt.total_seconds() / 60
+
+    fig = px.scatter(data, 
+                     x='ElapsedMinutes', 
+                     y='effPressure',
+                     size='effPressure',
+                     color='mixNum',
+                     hover_name='mixNum',
+                     animation_frame='ElapsedMinutes',
+                     animation_group='mixNum',
+                     range_y=[0, data['effPressure'].max() * 1.1],
+                     color_discrete_map={2: 'blue', 3: 'cyan', 4: 'magenta', 5: 'orange'},
+                     labels={'ElapsedMinutes': 'Time (minutes)', 
+                             'effPressure': 'Effective Pressure (bar)',
+                             'mixNum': 'Mix Type'},
+                     title='Pressure Bubble Animation')
+
+    fig.update_layout(
+        xaxis_title='Time (minutes)',
+        yaxis_title='Effective Pressure (bar)',
+        coloraxis_colorbar_title='Mix Type'
+    )
+
+    return fig
+
 # Helper function to add trace to figure
 def add_trace(fig, data, name, y_col, color, yaxis='y'):
     fig.add_trace(go.Scatter(
@@ -546,7 +580,7 @@ encoded_logo = None
 try:
     with open('Lizard_Logo.jpg', 'rb') as f:
         encoded_logo = base64.b64encode(f.read()).decode('ascii')
-except FileNotFoundError:
+   except FileNotFoundError:
     print("Logo file 'Lizard_Logo.jpg' not found. The app will run without the logo.")
 
 # Initialize Dash app
@@ -605,6 +639,7 @@ app.layout = html.Div([
     html.Button('Show/Hide 3D Scatter', id='toggle-3d-scatter-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
     html.Button('Show/Hide Pie Chart', id='toggle-pie-chart-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
     html.Button('Show/Hide Noise Reduction (MA)', id='toggle-ma-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
+    html.Button('Show/Hide Pressure Bubble Animation', id='toggle-bubble-chart-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
     
     dcc.Loading(
         id="loading",
@@ -616,6 +651,7 @@ app.layout = html.Div([
             dcc.Graph(id='scatter-3d-plot', style={'display': 'none'}),
             dcc.Graph(id='pie-chart', style={'display': 'none'}),
             dcc.Graph(id='ma-graph', style={'display': 'none'}),
+            dcc.Graph(id='bubble-chart', style={'display': 'none'}),
         ]
     ),
     
@@ -709,6 +745,7 @@ def display_click_data(clickData):
      Output('scatter-3d-plot', 'figure'),
      Output('pie-chart', 'figure'),
      Output('ma-graph', 'figure'),
+     Output('bubble-chart', 'figure'),
      Output('injection-details', 'children'),
      Output('mix-summary', 'children'),
      Output('error-summary', 'children'),
@@ -745,6 +782,9 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
                 hovermode='x unified'
             )
 
+            # Generate bubble chart
+            bubble_fig = generate_bubble_chart(df)
+
             injection_details = update_injection_details(df, stage, hole_id)
             mix_summary = html.Div([
                 html.P(f"Mix {mix}: {count} times") for mix, count in mixes_and_marsh.items() if mix not in ['Cumulative Zero Flow']
@@ -765,11 +805,11 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
             ]) if not notes_data.empty else ""
 
             return (f"File '{filename}' processed successfully", "",
-                    fig, temp_fig, scatter_3d_fig, pie_fig, ma_fig, injection_details, mix_summary, error_summary, giv_operator_notes, "")
+                    fig, temp_fig, scatter_3d_fig, pie_fig, ma_fig, bubble_fig, injection_details, mix_summary, error_summary, giv_operator_notes, "")
         except Exception as e:
             error_message = f"Error processing file: {str(e)}"
             print(error_message)
-            return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
+            return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
 
     elif trigger_id == 'load-data-button' and hole_id and stage:
         try:
@@ -778,7 +818,7 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
             if data is None or data.empty:
                 error_message = f"No data found for Hole ID: {hole_id} and Stage: {stage}"
                 print(error_message)
-                return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
+                return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
             
             print(f"Data retrieved successfully. Shape: {data.shape}")
             mixes_and_marsh = track_mixes_and_marsh_values(data)
@@ -796,6 +836,9 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
                 yaxis2=dict(title='Effective Pressure (bar)', overlaying='y', side='right'),
                 hovermode='x unified'
             )
+            
+            # Generate bubble chart
+            bubble_fig = generate_bubble_chart(data)
             
             injection_details = update_injection_details(data, stage, hole_id)
             mix_summary = html.Div([
@@ -816,11 +859,11 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
                 html.Pre(update_notes_table(notes_data))
             ]) if not notes_data.empty else ""
 
-            return f"Data for {hole_id} {stage} loaded successfully", "", fig, temp_fig, scatter_3d_fig, pie_fig, ma_fig, injection_details, mix_summary, error_summary, giv_operator_notes, ""
+            return f"Data for {hole_id} {stage} loaded successfully", "", fig, temp_fig, scatter_3d_fig, pie_fig, ma_fig, bubble_fig, injection_details, mix_summary, error_summary, giv_operator_notes, ""
         except Exception as e:
             error_message = f"Error loading data: {str(e)}"
             print(error_message)
-            return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
+            return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
 
     raise PreventUpdate
 
@@ -861,6 +904,15 @@ def toggle_ma_graph(n_clicks):
         return {'display': 'none'}
     return {'display': 'block' if n_clicks % 2 == 1 else 'none'}
 
+@app.callback(
+    Output('bubble-chart', 'style'),
+    [Input('toggle-bubble-chart-button', 'n_clicks')]
+)
+def toggle_bubble_chart(n_clicks):
+    if n_clicks is None:
+        return {'display': 'none'}
+    return {'display': 'block' if n_clicks % 2 == 1 else 'none'}
+
 # Callback for bug report/feedback button
 @app.callback(
     Output("bug-report-button", "n_clicks"),
@@ -882,6 +934,7 @@ def open_email_client(n_clicks):
      State('scatter-3d-plot', 'figure'),
      State('pie-chart', 'figure'),
      State('ma-graph', 'figure'),
+     State('bubble-chart', 'figure'),
      State('injection-details', 'children'),
      State('mix-summary', 'children'),
      State('error-summary', 'children'),
@@ -889,7 +942,7 @@ def open_email_client(n_clicks):
      State('recipe-table', 'data'),
      State('qc-by-input', 'value')]
 )
-def print_report(n_clicks, figure, temp_figure, scatter_3d_figure, pie_figure, ma_figure, injection_details, mix_summary, error_summary, giv_operator_notes, recipe_table_data, qc_by):
+def print_report(n_clicks, figure, temp_figure, scatter_3d_figure, pie_figure, ma_figure, bubble_figure, injection_details, mix_summary, error_summary, giv_operator_notes, recipe_table_data, qc_by):
     if n_clicks > 0:
         try:
             # Convert the figures to HTML divs
@@ -898,6 +951,7 @@ def print_report(n_clicks, figure, temp_figure, scatter_3d_figure, pie_figure, m
             scatter_3d_plot_div = pio.to_html(scatter_3d_figure, full_html=False)
             pie_chart_div = pio.to_html(pie_figure, full_html=False)
             ma_plot_div = pio.to_html(ma_figure, full_html=False)
+            bubble_chart_div = pio.to_html(bubble_figure, full_html=False)
 
             # Convert recipe table to HTML
             recipe_table_html = """
@@ -966,6 +1020,10 @@ def print_report(n_clicks, figure, temp_figure, scatter_3d_figure, pie_figure, m
                     <div class="section">
                         <h2>Noise Reduction (Moving Average) Graph</h2>
                         {ma_plot_div}
+                    </div>
+                    <div class="section">
+                        <h2>Pressure Bubble Animation</h2>
+                        {bubble_chart_div}
                     </div>
                     <div class="section">
                         <h2>Recipe Table</h2>
