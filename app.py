@@ -15,6 +15,7 @@ import os
 import time
 import json
 from functools import lru_cache
+import webbrowser
 
 # SQLAlchemy imports
 from sqlalchemy import create_engine, Table, Column, Integer, String, MetaData, Float, TIMESTAMP, select, func, text
@@ -113,11 +114,10 @@ def extract_file_details(file_name):
         match = re.search(pattern, file_name)
         if match:
             hole_id, stage = match.groups()
-            order = 'P' if hole_id.startswith('P') else 'S'
-            return hole_id, stage, order
+            return hole_id, stage
     except Exception as e:
         print(f"Error extracting file details from {file_name}: {e}")
-    return None, None, None
+    return None, None
 
 # Function to clean data
 def clean_data(data):
@@ -163,10 +163,11 @@ def parse_contents(contents, filename):
             raise ValueError("Unsupported file type")
         cleaned_data = clean_data(df)
         mixes_and_marsh = track_mixes_and_marsh_values(cleaned_data)
-        return cleaned_data, mixes_and_marsh
+        hole_id, stage = extract_file_details(filename)
+        return cleaned_data, mixes_and_marsh, hole_id, stage
     except Exception as e:
         print(f"Error parsing file: {e}")
-        return None, None
+        return None, None, None, None
 
 # Function to store processed data into the database
 def store_processed_data(df, hole_id, stage):
@@ -281,7 +282,7 @@ def extract_notes(data):
 def generate_interactive_graph(data):
     try:
         if data is None or data.empty:
-            return None, None, None, None, None, None
+            return None, None, None, None, None, None, None
 
         marsh_changes = identify_marsh_changes(data)
         notes_data = extract_notes(data)
@@ -380,10 +381,50 @@ def generate_interactive_graph(data):
         )])
         pie_fig.update_layout(title='Mix Volumes')
 
-        return fig, temp_fig, scatter_3d_fig, pie_fig, data, notes_data
+        # Create Animated Bubble Chart
+        bubble_fig = px.scatter(data, x='ElapsedMinutes', y='flow', size='effPressure', color='mixNum',
+                                hover_name='mixNum', animation_frame='ElapsedMinutes',
+                                size_max=50, range_color=[2, 5],
+                                color_discrete_map={2: 'blue', 3: 'cyan', 4: 'magenta', 5: 'orange'},
+                                labels={'mixNum': 'Mix Type', 'effPressure': 'Effective Pressure'},
+                                title='Pressure Bubble Animation')
+        bubble_fig.update_layout(
+            xaxis_title='Time Elapsed (Minutes)',
+            yaxis_title='Flow Rate (L/min)',
+            coloraxis_colorbar_title='Mix Type'
+        )
+
+        # Create Lugeon vs Flow plot
+        lugeon_flow_fig = go.Figure()
+        for mix, color in mix_colors.items():
+            mix_data = data[data['mixNum'] == mix]
+            lugeon_flow_fig.add_trace(go.Scatter(
+                x=mix_data['ElapsedMinutes'],
+                y=mix_data['Lugeon'],
+                mode='lines+markers',
+                name=f'Lugeon, Mix {mix_labels[mix]}',
+                line=dict(color=color)
+            ))
+        lugeon_flow_fig.add_trace(go.Scatter(
+            x=data['ElapsedMinutes'],
+            y=data['flow'],
+            mode='lines+markers',
+            name='Flow',
+            line=dict(color='black'),
+            yaxis='y2'
+        ))
+        lugeon_flow_fig.update_layout(
+            title='Lugeon vs Flow over Time',
+            xaxis_title='Time Elapsed (Minutes)',
+            yaxis_title='Lugeon',
+            yaxis2=dict(title='Flow Rate (L/min)', overlaying='y', side='right'),
+            hovermode='x unified'
+        )
+
+        return fig, temp_fig, scatter_3d_fig, pie_fig, bubble_fig, lugeon_flow_fig, data, notes_data
     except Exception as e:
         print(f"Error generating interactive graph: {e}")
-        return None, None, None, None, None, None
+        return None, None, None, None, None, None, None, None
 
 # Helper function to add trace to figure
 def add_trace(fig, data, name, y_col, color, yaxis='y'):
@@ -524,7 +565,7 @@ def update_notes_table(notes_data):
     try:
         if notes_data is None or notes_data.empty:
             return ""
-        comments = [f"{row['Timestamp']} - {row['Note']}" for _, row in notes_data.iterrows() if pd.notna(row['Note'])]
+        comments = [f"{row['Timestamp']} - {row['Note']}" for _, row in notes_data.iterrows() if pd.notna(row['Note']) and row['Note'] != 'NaN']
         return "\n".join(comments)
     except Exception as e:
         print(f"Error updating notes table: {e}")
@@ -540,6 +581,68 @@ def apply_tma(data, window_size=5):
     data['effPressure_tma'] = data['effPressure'].rolling(window=len(weights), center=True).apply(lambda x: np.sum(weights * x), raw=False)
     
     return data
+
+# Function to generate stage standing chart
+def generate_stage_standing_chart(data, selected_stage):
+    try:
+        # Get all stages for the current hole_id
+        hole_id = data['hole_id'].iloc[0]
+        all_stages = get_unique_values('processed_data', 'stage', hole_id)
+        
+        # Calculate total volume for each stage
+        stage_volumes = []
+        for stage in all_stages:
+            stage_data = retrieve_processed_data(hole_id, stage)
+            if stage_data is not None and not stage_data.empty:
+                total_volume = stage_data['volume'].iloc[-1]
+                mix_volumes = calculate_grout_and_mix_volumes(stage_data)
+                stage_volumes.append((stage, total_volume, mix_volumes))
+        
+        # Sort stages by total volume
+        stage_volumes.sort(key=lambda x: x[1])
+        
+        # Create the bar chart
+        fig = go.Figure()
+        
+        for i, (stage, total_volume, mix_volumes) in enumerate(stage_volumes):
+            bottom = 0
+            for j, mix_volume in enumerate(mix_volumes[:4]):  # Only the first 4 mix volumes
+                if mix_volume > 0:
+                    fig.add_trace(go.Bar(
+                        x=[stage],
+                        y=[mix_volume],
+                        name=f'Mix {chr(65+j)}',
+                        marker_color=['blue', 'cyan', 'magenta', 'orange'][j],
+                        text=f'Mix {chr(65+j)}: {mix_volume:.2f} L',
+                        hoverinfo='text',
+                        base=bottom
+                    ))
+                    bottom += mix_volume
+        
+        fig.update_layout(
+            title='Stage Standing Chart',
+            xaxis_title='Stage',
+            yaxis_title='Total Volume (L)',
+            barmode='stack',
+            showlegend=True
+        )
+        
+        # Highlight the selected stage
+        selected_index = all_stages.index(selected_stage)
+        fig.add_shape(
+            type="rect",
+            x0=selected_index-0.5,
+            x1=selected_index+0.5,
+            y0=0,
+            y1=stage_volumes[selected_index][1],
+            line=dict(color="Red", width=3),
+            fillcolor="None"
+        )
+        
+        return fig
+    except Exception as e:
+        print(f"Error generating stage standing chart: {e}")
+        return go.Figure()
 
 # Load and encode the Gecko logo
 encoded_logo = None
@@ -605,6 +708,9 @@ app.layout = html.Div([
     html.Button('Show/Hide 3D Scatter', id='toggle-3d-scatter-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
     html.Button('Show/Hide Pie Chart', id='toggle-pie-chart-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
     html.Button('Show/Hide Noise Reduction (MA)', id='toggle-ma-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
+    html.Button('Show/Hide Pressure Bubble Animation', id='toggle-bubble-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
+    html.Button('Show/Hide Lugeon vs Flow', id='toggle-lugeon-flow-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
+    html.Button('Show/Hide Stage Standing Chart', id='toggle-stage-standing-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
     
     dcc.Loading(
         id="loading",
@@ -616,6 +722,9 @@ app.layout = html.Div([
             dcc.Graph(id='scatter-3d-plot', style={'display': 'none'}),
             dcc.Graph(id='pie-chart', style={'display': 'none'}),
             dcc.Graph(id='ma-graph', style={'display': 'none'}),
+            dcc.Graph(id='bubble-chart', style={'display': 'none'}),
+            dcc.Graph(id='lugeon-flow-graph', style={'display': 'none'}),
+            dcc.Graph(id='stage-standing-chart', style={'display': 'none'}),
         ]
     ),
     
@@ -709,11 +818,16 @@ def display_click_data(clickData):
      Output('scatter-3d-plot', 'figure'),
      Output('pie-chart', 'figure'),
      Output('ma-graph', 'figure'),
+     Output('bubble-chart', 'figure'),
+     Output('lugeon-flow-graph', 'figure'),
+     Output('stage-standing-chart', 'figure'),
      Output('injection-details', 'children'),
      Output('mix-summary', 'children'),
      Output('error-summary', 'children'),
      Output('giv-operator-notes', 'children'),
-     Output('processing-message', 'children')],
+     Output('processing-message', 'children'),
+     Output('hole-id-dropdown', 'value'),
+     Output('stage-dropdown', 'value')],
     [Input('upload-data', 'contents'),
      Input('run-tool-button-1', 'n_clicks'),
      Input('load-data-button', 'n_clicks'),
@@ -727,11 +841,11 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
 
     if trigger_id == 'upload-data' and contents:
         try:
-            df, mixes_and_marsh = parse_contents(contents, filename)
+            df, mixes_and_marsh, file_hole_id, file_stage = parse_contents(contents, filename)
             if df is None:
                 raise ValueError("Error parsing file contents")
 
-            fig, temp_fig, scatter_3d_fig, pie_fig, data, notes_data = generate_interactive_graph(df)
+            fig, temp_fig, scatter_3d_fig, pie_fig, bubble_fig, lugeon_flow_fig, data, notes_data = generate_interactive_graph(df)
             
             # Generate MA graph
             df_ma = apply_tma(df)
@@ -745,7 +859,10 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
                 hovermode='x unified'
             )
 
-            injection_details = update_injection_details(df, stage, hole_id)
+            # Generate Stage Standing Chart
+            stage_standing_fig = generate_stage_standing_chart(df, file_stage)
+
+            injection_details = update_injection_details(df, file_stage, file_hole_id)
             mix_summary = html.Div([
                 html.P(f"Mix {mix}: {count} times") for mix, count in mixes_and_marsh.items() if mix not in ['Cumulative Zero Flow']
             ])
@@ -765,11 +882,14 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
             ]) if not notes_data.empty else ""
 
             return (f"File '{filename}' processed successfully", "",
-                    fig, temp_fig, scatter_3d_fig, pie_fig, ma_fig, injection_details, mix_summary, error_summary, giv_operator_notes, "")
+                    fig, temp_fig, scatter_3d_fig, pie_fig, ma_fig, bubble_fig, lugeon_flow_fig, stage_standing_fig,
+                    injection_details, mix_summary, error_summary, giv_operator_notes, "", file_hole_id, file_stage)
         except Exception as e:
             error_message = f"Error processing file: {str(e)}"
             print(error_message)
-            return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
+            return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, \
+                   dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, \
+                   dash.no_update, "", dash.no_update, dash.no_update
 
     elif trigger_id == 'load-data-button' and hole_id and stage:
         try:
@@ -778,12 +898,14 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
             if data is None or data.empty:
                 error_message = f"No data found for Hole ID: {hole_id} and Stage: {stage}"
                 print(error_message)
-                return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
+                return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, \
+                       dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, \
+                       dash.no_update, "", dash.no_update, dash.no_update
             
             print(f"Data retrieved successfully. Shape: {data.shape}")
             mixes_and_marsh = track_mixes_and_marsh_values(data)
             
-            fig, temp_fig, scatter_3d_fig, pie_fig, _, notes_data = generate_interactive_graph(data)
+            fig, temp_fig, scatter_3d_fig, pie_fig, bubble_fig, lugeon_flow_fig, _, notes_data = generate_interactive_graph(data)
             
             # Generate MA graph
             data_ma = apply_tma(data)
@@ -796,6 +918,9 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
                 yaxis2=dict(title='Effective Pressure (bar)', overlaying='y', side='right'),
                 hovermode='x unified'
             )
+
+            # Generate Stage Standing Chart
+            stage_standing_fig = generate_stage_standing_chart(data, stage)
             
             injection_details = update_injection_details(data, stage, hole_id)
             mix_summary = html.Div([
@@ -816,11 +941,15 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
                 html.Pre(update_notes_table(notes_data))
             ]) if not notes_data.empty else ""
 
-            return f"Data for {hole_id} {stage} loaded successfully", "", fig, temp_fig, scatter_3d_fig, pie_fig, ma_fig, injection_details, mix_summary, error_summary, giv_operator_notes, ""
+            return f"Data for {hole_id} {stage} loaded successfully", "", fig, temp_fig, scatter_3d_fig, pie_fig, ma_fig, \
+                   bubble_fig, lugeon_flow_fig, stage_standing_fig, injection_details, mix_summary, error_summary, \
+                   giv_operator_notes, "", hole_id, stage
         except Exception as e:
             error_message = f"Error loading data: {str(e)}"
             print(error_message)
-            return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
+            return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, \
+                   dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, \
+                   dash.no_update, "", dash.no_update, dash.no_update
 
     raise PreventUpdate
 
@@ -861,6 +990,33 @@ def toggle_ma_graph(n_clicks):
         return {'display': 'none'}
     return {'display': 'block' if n_clicks % 2 == 1 else 'none'}
 
+@app.callback(
+    Output('bubble-chart', 'style'),
+    [Input('toggle-bubble-button', 'n_clicks')]
+)
+def toggle_bubble_chart(n_clicks):
+    if n_clicks is None:
+        return {'display': 'none'}
+    return {'display': 'block' if n_clicks % 2 == 1 else 'none'}
+
+@app.callback(
+    Output('lugeon-flow-graph', 'style'),
+    [Input('toggle-lugeon-flow-button', 'n_clicks')]
+)
+def toggle_lugeon_flow_graph(n_clicks):
+    if n_clicks is None:
+        return {'display': 'none'}
+    return {'display': 'block' if n_clicks % 2 == 1 else 'none'}
+
+@app.callback(
+    Output('stage-standing-chart', 'style'),
+    [Input('toggle-stage-standing-button', 'n_clicks')]
+)
+def toggle_stage_standing_chart(n_clicks):
+    if n_clicks is None:
+        return {'display': 'none'}
+    return {'display': 'block' if n_clicks % 2 == 1 else 'none'}
+
 # Callback for bug report/feedback button
 @app.callback(
     Output("bug-report-button", "n_clicks"),
@@ -868,7 +1024,6 @@ def toggle_ma_graph(n_clicks):
 )
 def open_email_client(n_clicks):
     if n_clicks > 0:
-        import webbrowser
         mailto_link = "mailto:Ehab.Mdallal@wsp.com?subject=Grout Gecko V-1.0 Feedback&body=This app is designed for the QHBW project to perform deep analysis, identify human errors, and collect high-quality data, enhancing the QHBW Leapfrog model. Please note that this tool is still under development. Bugs and inaccuracies might be found; your feedback is appreciated.%0D%0ARegards"
         webbrowser.open(mailto_link)
     return 0
@@ -882,6 +1037,9 @@ def open_email_client(n_clicks):
      State('scatter-3d-plot', 'figure'),
      State('pie-chart', 'figure'),
      State('ma-graph', 'figure'),
+     State('bubble-chart', 'figure'),
+     State('lugeon-flow-graph', 'figure'),
+     State('stage-standing-chart', 'figure'),
      State('injection-details', 'children'),
      State('mix-summary', 'children'),
      State('error-summary', 'children'),
@@ -889,7 +1047,7 @@ def open_email_client(n_clicks):
      State('recipe-table', 'data'),
      State('qc-by-input', 'value')]
 )
-def print_report(n_clicks, figure, temp_figure, scatter_3d_figure, pie_figure, ma_figure, injection_details, mix_summary, error_summary, giv_operator_notes, recipe_table_data, qc_by):
+def print_report(n_clicks, figure, temp_figure, scatter_3d_figure, pie_figure, ma_figure, bubble_figure, lugeon_flow_figure, stage_standing_figure, injection_details, mix_summary, error_summary, giv_operator_notes, recipe_table_data, qc_by):
     if n_clicks > 0:
         try:
             # Convert the figures to HTML divs
@@ -898,6 +1056,9 @@ def print_report(n_clicks, figure, temp_figure, scatter_3d_figure, pie_figure, m
             scatter_3d_plot_div = pio.to_html(scatter_3d_figure, full_html=False)
             pie_chart_div = pio.to_html(pie_figure, full_html=False)
             ma_plot_div = pio.to_html(ma_figure, full_html=False)
+            bubble_plot_div = pio.to_html(bubble_figure, full_html=False)
+            lugeon_flow_plot_div = pio.to_html(lugeon_flow_figure, full_html=False)
+            stage_standing_plot_div = pio.to_html(stage_standing_figure, full_html=False)
 
             # Convert recipe table to HTML
             recipe_table_html = """
@@ -968,6 +1129,18 @@ def print_report(n_clicks, figure, temp_figure, scatter_3d_figure, pie_figure, m
                         {ma_plot_div}
                     </div>
                     <div class="section">
+                        <h2>Pressure Bubble Animation</h2>
+                        {bubble_plot_div}
+                    </div>
+                    <div class="section">
+                        <h2>Lugeon vs Flow Graph</h2>
+                        {lugeon_flow_plot_div}
+                    </div>
+                    <div class="section">
+                        <h2>Stage Standing Chart</h2>
+                        {stage_standing_plot_div}
+                    </div>
+                    <div class="section">
                         <h2>Recipe Table</h2>
                         {recipe_table_html}
                     </div>
@@ -1001,7 +1174,6 @@ def print_report(n_clicks, figure, temp_figure, scatter_3d_figure, pie_figure, m
                 f.write(html_content)
 
             # Open the HTML file in the default web browser
-            import webbrowser
             webbrowser.open('file://' + os.path.realpath(output_path), new=2)
 
             print(f"HTML report generated and opened: {output_path}")
