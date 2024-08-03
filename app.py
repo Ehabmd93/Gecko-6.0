@@ -380,44 +380,34 @@ def generate_interactive_graph(data):
         )])
         pie_fig.update_layout(title='Mix Volumes')
 
-        return fig, temp_fig, scatter_3d_fig, pie_fig, data, notes_data
+        # Create Bubble Chart
+        bubble_fig = generate_bubble_chart(data)
+
+        return fig, temp_fig, scatter_3d_fig, pie_fig, bubble_fig, data, notes_data
     except Exception as e:
         print(f"Error generating interactive graph: {e}")
-        return None, None, None, None, None, None
+        return None, None, None, None, None, None, None
 
-# Function to generate bubble chart
+# New function to generate bubble chart
 def generate_bubble_chart(data):
-    if data is None or data.empty:
-        return go.Figure()
-
-    # Ensure 'TIMESTAMP' is in datetime format
-    data['TIMESTAMP'] = pd.to_datetime(data['TIMESTAMP'])
-    
-    # Calculate elapsed time in minutes
-    data['ElapsedMinutes'] = (data['TIMESTAMP'] - data['TIMESTAMP'].min()).dt.total_seconds() / 60
-
-    fig = px.scatter(data, 
-                     x='ElapsedMinutes', 
-                     y='effPressure',
-                     size='effPressure',
-                     color='mixNum',
-                     hover_name='mixNum',
-                     animation_frame='ElapsedMinutes',
-                     animation_group='mixNum',
-                     range_y=[0, data['effPressure'].max() * 1.1],
-                     color_discrete_map={2: 'blue', 3: 'cyan', 4: 'magenta', 5: 'orange'},
-                     labels={'ElapsedMinutes': 'Time (minutes)', 
-                             'effPressure': 'Effective Pressure (bar)',
-                             'mixNum': 'Mix Type'},
-                     title='Pressure Bubble Animation')
-
-    fig.update_layout(
-        xaxis_title='Time (minutes)',
-        yaxis_title='Effective Pressure (bar)',
-        coloraxis_colorbar_title='Mix Type'
-    )
-
-    return fig
+    try:
+        fig = px.scatter(data, x='ElapsedMinutes', y='flow', size='effPressure', color='mixNum',
+                         hover_name='mixNum', animation_frame='ElapsedMinutes',
+                         size_max=50, range_color=[2, 5],
+                         color_discrete_map={2: 'blue', 3: 'cyan', 4: 'magenta', 5: 'orange'},
+                         labels={'mixNum': 'Mix Type', 'effPressure': 'Effective Pressure', 'flow': 'Flow Rate'},
+                         title='Pressure Bubble Animation')
+        
+        fig.update_layout(
+            xaxis_title='Time Elapsed (Minutes)',
+            yaxis_title='Flow Rate (L/min)',
+            showlegend=True
+        )
+        
+        return fig
+    except Exception as e:
+        print(f"Error generating bubble chart: {e}")
+        return None
 
 # Helper function to add trace to figure
 def add_trace(fig, data, name, y_col, color, yaxis='y'):
@@ -580,7 +570,7 @@ encoded_logo = None
 try:
     with open('Lizard_Logo.jpg', 'rb') as f:
         encoded_logo = base64.b64encode(f.read()).decode('ascii')
-   except FileNotFoundError:
+except FileNotFoundError:
     print("Logo file 'Lizard_Logo.jpg' not found. The app will run without the logo.")
 
 # Initialize Dash app
@@ -639,7 +629,7 @@ app.layout = html.Div([
     html.Button('Show/Hide 3D Scatter', id='toggle-3d-scatter-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
     html.Button('Show/Hide Pie Chart', id='toggle-pie-chart-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
     html.Button('Show/Hide Noise Reduction (MA)', id='toggle-ma-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
-    html.Button('Show/Hide Pressure Bubble Animation', id='toggle-bubble-chart-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
+    html.Button('Show/Hide Pressure Bubble Animation', id='toggle-bubble-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
     
     dcc.Loading(
         id="loading",
@@ -768,7 +758,7 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
             if df is None:
                 raise ValueError("Error parsing file contents")
 
-            fig, temp_fig, scatter_3d_fig, pie_fig, data, notes_data = generate_interactive_graph(df)
+            fig, temp_fig, scatter_3d_fig, pie_fig, bubble_fig, data, notes_data = generate_interactive_graph(df)
             
             # Generate MA graph
             df_ma = apply_tma(df)
@@ -781,9 +771,6 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
                 yaxis2=dict(title='Effective Pressure (bar)', overlaying='y', side='right'),
                 hovermode='x unified'
             )
-
-            # Generate bubble chart
-            bubble_fig = generate_bubble_chart(df)
 
             injection_details = update_injection_details(df, stage, hole_id)
             mix_summary = html.Div([
@@ -823,7 +810,7 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
             print(f"Data retrieved successfully. Shape: {data.shape}")
             mixes_and_marsh = track_mixes_and_marsh_values(data)
             
-            fig, temp_fig, scatter_3d_fig, pie_fig, _, notes_data = generate_interactive_graph(data)
+            fig, temp_fig, scatter_3d_fig, pie_fig, bubble_fig, _, notes_data = generate_interactive_graph(data)
             
             # Generate MA graph
             data_ma = apply_tma(data)
@@ -836,9 +823,6 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
                 yaxis2=dict(title='Effective Pressure (bar)', overlaying='y', side='right'),
                 hovermode='x unified'
             )
-            
-            # Generate bubble chart
-            bubble_fig = generate_bubble_chart(data)
             
             injection_details = update_injection_details(data, stage, hole_id)
             mix_summary = html.Div([
@@ -906,7 +890,7 @@ def toggle_ma_graph(n_clicks):
 
 @app.callback(
     Output('bubble-chart', 'style'),
-    [Input('toggle-bubble-chart-button', 'n_clicks')]
+    [Input('toggle-bubble-button', 'n_clicks')]
 )
 def toggle_bubble_chart(n_clicks):
     if n_clicks is None:
