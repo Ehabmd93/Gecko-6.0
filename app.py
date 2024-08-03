@@ -34,7 +34,7 @@ def log_error(message):
 DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://qhbw_sql_vx26_user:glwGtA9yoGUtBrow7YdM9Ps80xNkGQIL@dpg-cqli5h08fa8c73aurv40-a.oregon-postgres.render.com/qhbw_sql_vx26')
 
 # Initialize SQLAlchemy engine with connection pooling
-engine = create_engine(DATABASE_URL, poolclass=QueuePool, pool_size=5, max_overflow=10, pool_pre_ping=True)
+engine = create_engine(DATABASE_URL, poolclass=QueuePool, pool_size=10, max_overflow=20, pool_pre_ping=True)
 
 # Define metadata
 metadata = MetaData()
@@ -43,9 +43,9 @@ metadata = MetaData()
 processed_data = Table(
     'processed_data', metadata,
     Column('id', Integer, primary_key=True),
-    Column('hole_id', String),
-    Column('stage', String),
-    Column('TIMESTAMP', TIMESTAMP),
+    Column('hole_id', String, index=True),
+    Column('stage', String, index=True),
+    Column('TIMESTAMP', TIMESTAMP, index=True),
     Column('RECORD', Float),
     Column('CumTimeMin', Float),
     Column('flow', Float),
@@ -152,38 +152,33 @@ def parse_contents(contents, filename):
 def store_processed_data(df, hole_id, stage):
     try:
         with engine.begin() as connection:
-            records = df.to_dict(orient='records')
-            for record in records:
-                record['hole_id'] = hole_id
-                record['stage'] = stage
-                insert_stmt = processed_data.insert().values(**record)
-                connection.execute(insert_stmt)
+            df['hole_id'] = hole_id
+            df['stage'] = stage
+            df.to_sql('processed_data', connection, if_exists='append', index=False, method='multi', chunksize=1000)
         print(f"Data for {hole_id} {stage} stored successfully.")
     except Exception as e:
         log_error(f"Error storing processed data: {e}")
 
 def retrieve_processed_data(hole_id, stage):
     try:
-        with engine.connect() as connection:
-            query = text("""
-                SELECT * FROM processed_data 
-                WHERE hole_id = :hole_id AND stage = :stage
-                ORDER BY "TIMESTAMP"
-            """)
-            result = connection.execute(query, {"hole_id": hole_id, "stage": stage})
-            df = pd.DataFrame(result.fetchall())
-            if df.empty:
-                print(f"No data found for hole_id: {hole_id} and stage: {stage}")
-            else:
-                print(f"Retrieved {len(df)} rows for hole_id: {hole_id} and stage: {stage}")
-                
-            float_columns = ['holeAngle', 'vmarshGrout', 'vmarshWater', 'RECORD', 'CumTimeMin', 'flow', 'AvgFlow', 'volume', 'gaugePressure', 'AvgGaugePressure', 'effPressure', 'AvgEffectivePressure', 'Lugeon', 'Batt_V', 'PTemp', 'holeNum', 'mixNum', 'waterTable', 'stageTop', 'stageBottom', 'gaugeHeight', 'waterDepth']
-            df[float_columns] = df[float_columns].apply(pd.to_numeric, errors='coerce')
-            
-            if 'TIMESTAMP' in df.columns:
-                df['TIMESTAMP'] = pd.to_datetime(df['TIMESTAMP'])
-            
-            return df
+        query = text("""
+            SELECT * FROM processed_data 
+            WHERE hole_id = :hole_id AND stage = :stage
+            ORDER BY "TIMESTAMP"
+        """)
+        df = pd.read_sql_query(query, engine, params={"hole_id": hole_id, "stage": stage})
+        
+        if df.empty:
+            print(f"No data found for hole_id: {hole_id} and stage: {stage}")
+        else:
+            print(f"Retrieved {len(df)} rows for hole_id: {hole_id} and stage: {stage}")
+        
+        float_columns = ['holeAngle', 'vmarshGrout', 'vmarshWater', 'RECORD', 'CumTimeMin', 'flow', 'AvgFlow', 'volume', 'gaugePressure', 'AvgGaugePressure', 'effPressure', 'AvgEffectivePressure', 'Lugeon', 'Batt_V', 'PTemp', 'holeNum', 'mixNum', 'waterTable', 'stageTop', 'stageBottom', 'gaugeHeight', 'waterDepth']
+        df[float_columns] = df[float_columns].apply(pd.to_numeric, errors='coerce')
+        
+        df['TIMESTAMP'] = pd.to_datetime(df['TIMESTAMP'])
+        
+        return df
     except Exception as e:
         log_error(f"Error retrieving processed data: {e}")
         return None
@@ -358,17 +353,47 @@ def generate_interactive_graph(data):
 
 def generate_bubble_chart(data):
     try:
-        fig = px.scatter(data, x='ElapsedMinutes', y='flow', size='effPressure', color='mixNum',
-                         hover_name='mixNum', animation_frame='ElapsedMinutes',
+        # Downsample the data to improve performance
+        total_duration = (data['TIMESTAMP'].max() - data['TIMESTAMP'].min()).total_seconds() / 3600  # in hours
+        target_frames = int(total_duration * 15)  # 15 frames per hour
+        downsample_factor = max(1, len(data) // target_frames)
+        
+        downsampled_data = data.iloc[::downsample_factor].copy()
+        downsampled_data['ElapsedHours'] = (downsampled_data['TIMESTAMP'] - downsampled_data['TIMESTAMP'].min()).dt.total_seconds() / 3600
+
+        fig = px.scatter(downsampled_data, x='ElapsedHours', y='flow', size='effPressure', color='mixNum',
+                         hover_name='mixNum', animation_frame='ElapsedHours',
                          size_max=50, range_color=[2, 5],
                          color_discrete_map={2: 'blue', 3: 'cyan', 4: 'magenta', 5: 'orange'},
                          labels={'mixNum': 'Mix Type', 'effPressure': 'Effective Pressure', 'flow': 'Flow Rate'},
                          title='Pressure Bubble Animation')
         
         fig.update_layout(
-            xaxis_title='Time Elapsed (Minutes)',
+            xaxis_title='Time Elapsed (Hours)',
             yaxis_title='Flow Rate (L/min)',
-            showlegend=True
+            showlegend=True,
+            updatemenus=[{
+                'buttons': [
+                    {
+                        'args': [None, {'frame': {'duration': 50, 'redraw': True}, 'fromcurrent': True}],
+                        'label': 'Play',
+                        'method': 'animate'
+                    },
+                    {
+                        'args': [[None], {'frame': {'duration': 0, 'redraw': True}, 'mode': 'immediate', 'transition': {'duration': 0}}],
+                        'label': 'Pause',
+                        'method': 'animate'
+                    }
+                ],
+                'direction': 'left',
+                'pad': {'r': 10, 't': 87},
+                'showactive': False,
+                'type': 'buttons',
+                'x': 0.1,
+                'xanchor': 'right',
+                'y': 0,
+                'yanchor': 'top'
+            }]
         )
         
         return fig
@@ -391,21 +416,9 @@ def add_trace(fig, data, name, y_col, color, yaxis='y'):
 
 def calculate_cumulative_zero_flow(data):
     try:
-        zero_flow_intervals = []
-        current_interval = None
-        for i, row in data.iterrows():
-            if row['flow'] == 0:
-                if current_interval is None:
-                    current_interval = {'start': row['TIMESTAMP'], 'end': row['TIMESTAMP']}
-                else:
-                    current_interval['end'] = row['TIMESTAMP']
-            else:
-                if current_interval is not None and (row['TIMESTAMP'] - current_interval['end']).total_seconds() > 180:
-                    interval_duration = (current_interval['end'] - current_interval['start']).total_seconds() / 60
-                    if interval_duration > 3:  # Only consider intervals longer than 3 minutes
-                        zero_flow_intervals.append(interval_duration)
-                    current_interval = None
-        cumulative_zero_flow = sum(zero_flow_intervals) / 60  # in hours
+        zero_flow_intervals = (data['flow'] == 0).astype(int).groupby(data['flow'].ne(0).cumsum()).sum()
+        zero_flow_intervals = zero_flow_intervals[zero_flow_intervals > 3]  # Only consider intervals longer than 3 minutes
+        cumulative_zero_flow = zero_flow_intervals.sum() / 60  # in hours
         return cumulative_zero_flow
     except Exception as e:
         log_error(f"Error calculating cumulative zero flow: {e}")
@@ -414,25 +427,11 @@ def calculate_cumulative_zero_flow(data):
 def calculate_grout_and_mix_volumes(data):
     try:
         cumulative_grout = data['volume'].iloc[-1]
-        mix_a_volume = mix_b_volume = mix_c_volume = mix_d_volume = 0
-
-        if not data.empty:
-            mix_changes = data[data['mixNum'].diff() != 0]
-            
-            # Calculate mix A volume
-            mix_a_end = mix_changes[mix_changes['mixNum'] == 3]
-            mix_a_volume = mix_a_end['volume'].iloc[0] if not mix_a_end.empty else cumulative_grout
-            
-            # Calculate mix B volume
-            mix_b_end = mix_changes[mix_changes['mixNum'] == 4]
-            mix_b_volume = mix_b_end['volume'].iloc[0] - mix_a_volume if not mix_b_end.empty else (cumulative_grout - mix_a_volume if data['mixNum'].max() >= 3 else 0)
-            
-            # Calculate mix C volume
-            mix_c_end = mix_changes[mix_changes['mixNum'] == 5]
-            mix_c_volume = mix_c_end['volume'].iloc[0] - (mix_a_volume + mix_b_volume) if not mix_c_end.empty else (cumulative_grout - mix_a_volume - mix_b_volume if data['mixNum'].max() >= 4 else 0)
-            
-            # Calculate mix D volume
-            mix_d_volume = cumulative_grout - (mix_a_volume + mix_b_volume + mix_c_volume) if data['mixNum'].max() == 5 else 0
+        mix_volumes = data.groupby('mixNum')['volume'].last().diff().fillna(data.groupby('mixNum')['volume'].last())
+        mix_a_volume = mix_volumes.get(2, 0)
+        mix_b_volume = mix_volumes.get(3, 0)
+        mix_c_volume = mix_volumes.get(4, 0)
+        mix_d_volume = mix_volumes.get(5, 0)
 
         return mix_a_volume, mix_b_volume, mix_c_volume, mix_d_volume, cumulative_grout
     except Exception as e:
@@ -445,8 +444,8 @@ def update_injection_details(data, selected_stage, selected_hole_id):
         first_non_zero_flow_time = non_zero_flow['TIMESTAMP'].min()
         last_timestamp = data['TIMESTAMP'].max()
 
-        stage_top = data.loc[(data['TIMESTAMP'] - first_non_zero_flow_time).abs().idxmin() + 10, 'stageTop']
-        stage_bottom = data.loc[(data['TIMESTAMP'] - first_non_zero_flow_time).abs().idxmin() + 10, 'stageBottom']
+        stage_top = data.loc[data['TIMESTAMP'].idxmin(), 'stageTop']
+        stage_bottom = data.loc[data['TIMESTAMP'].idxmin(), 'stageBottom']
         stage_length = stage_bottom - stage_top
 
         first_date = first_non_zero_flow_time.strftime('%Y-%m-%d')
@@ -460,8 +459,8 @@ def update_injection_details(data, selected_stage, selected_hole_id):
         zero_flow_interval = calculate_cumulative_zero_flow(data)
         net_grouting_time = total_grouting_time - zero_flow_interval
 
-        water_depth = data['waterDepth'].iloc[2] if len(data) > 2 else None
-        v_marsh_water = data['vmarshWater'].iloc[2] if len(data) > 2 else None
+        water_depth = data['waterDepth'].iloc[0]
+        v_marsh_water = data['vmarshWater'].iloc[0]
 
         details = [
             html.H2("Grout Injection Summary"),
@@ -533,6 +532,10 @@ try:
         encoded_logo = base64.b64encode(f.read()).decode('ascii')
 except FileNotFoundError:
     print("Logo file 'Lizard_Logo.jpg' not found. The app will run without the logo.")
+
+# Initialize Dash app
+app = Dash(__name__, suppress_callback_exceptions=True)
+server = app.server
 
 # Initialize Dash app
 app = Dash(__name__, suppress_callback_exceptions=True)
