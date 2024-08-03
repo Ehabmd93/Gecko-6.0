@@ -173,9 +173,9 @@ def retrieve_processed_data(hole_id, stage):
         else:
             print(f"Retrieved {len(df)} rows for hole_id: {hole_id} and stage: {stage}")
         
-        # Ensure 'Notes' column is treated as string
+        # Clean the Notes column
         if 'Notes' in df.columns:
-            df['Notes'] = df['Notes'].astype(str)
+            df['Notes'] = df['Notes'].replace({'NaN': None, 'nan': None}).fillna('')
         
         return df
     except Exception as e:
@@ -229,8 +229,12 @@ def extract_notes(data):
             return pd.DataFrame(columns=['Timestamp', 'Note'])
 
         notes_data = data[['TIMESTAMP', 'Notes']].copy()
-        # Filter out NaN and empty string notes
-        notes_data = notes_data[notes_data['Notes'].notna() & (notes_data['Notes'] != '')]
+        # Filter out 'NaN' strings, null values, and empty strings
+        notes_data = notes_data[
+            (notes_data['Notes'].notna()) & 
+            (notes_data['Notes'] != '') & 
+            (notes_data['Notes'].astype(str) != 'NaN')
+        ]
         
         if notes_data.empty:
             return pd.DataFrame(columns=['Timestamp', 'Note'])
@@ -246,9 +250,10 @@ def update_notes_table(notes_data):
     if notes_data is None or notes_data.empty:
         return "No operator notes available."
     
-    # Filter out any remaining NaN values and empty strings
-    valid_notes = [(row['Timestamp'], row['Note']) for _, row in notes_data.iterrows() 
-                   if pd.notna(row['Note']) and row['Note'].strip() != '']
+    valid_notes = [
+        (row['Timestamp'], row['Note']) for _, row in notes_data.iterrows() 
+        if pd.notna(row['Note']) and row['Note'] != '' and str(row['Note']) != 'NaN'
+    ]
     
     if not valid_notes:
         return "No valid operator notes available."
@@ -260,7 +265,8 @@ def store_processed_data(df, hole_id, stage):
         with engine.begin() as connection:
             df['hole_id'] = hole_id
             df['stage'] = stage
-            df['Notes'] = df['Notes'].fillna('').astype(str)
+            # Replace 'NaN' strings with empty string
+            df['Notes'] = df['Notes'].replace({'NaN': '', 'nan': ''}).fillna('')
             df.to_sql('processed_data', connection, if_exists='append', index=False, method='multi', chunksize=1000)
         print(f"Data for {hole_id} {stage} stored successfully.")
     except Exception as e:
