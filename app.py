@@ -229,6 +229,7 @@ def extract_notes(data):
             return pd.DataFrame(columns=['Timestamp', 'Note'])
 
         notes_data = data[['TIMESTAMP', 'Notes']].copy()
+        # Filter out NaN and empty string notes
         notes_data = notes_data[notes_data['Notes'].notna() & (notes_data['Notes'] != '')]
         
         if notes_data.empty:
@@ -245,8 +246,14 @@ def update_notes_table(notes_data):
     if notes_data is None or notes_data.empty:
         return "No operator notes available."
     
-    notes = [f"{row['Timestamp']} - {row['Note']}" for _, row in notes_data.iterrows()]
-    return "\n".join(notes) if notes else "No operator notes available."
+    # Filter out any remaining NaN values and empty strings
+    valid_notes = [(row['Timestamp'], row['Note']) for _, row in notes_data.iterrows() 
+                   if pd.notna(row['Note']) and row['Note'].strip() != '']
+    
+    if not valid_notes:
+        return "No valid operator notes available."
+    
+    return "\n".join(f"{timestamp} - {note}" for timestamp, note in valid_notes)
 
 def store_processed_data(df, hole_id, stage):
     try:
@@ -740,7 +747,7 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
             if df is None:
                 raise ValueError("Error parsing file contents")
 
-            fig, temp_fig, scatter_3d_fig, pie_fig, bubble_fig, data, notes_data = generate_interactive_graph(df)
+            fig, temp_fig, scatter_3d_fig, pie_fig, bubble_fig, data, _ = generate_interactive_graph(df)
             
             # Generate MA graph
             df_ma = apply_tma(df)
@@ -768,10 +775,12 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
             error_summary.extend([html.Span(error, style={'color': 'red'}) for error in mixes_and_marsh.get('Errors', [])] or ["NA"])
             error_summary = html.Div(error_summary)
 
+            # New code for handling notes
+            notes_data = extract_notes(df)
             giv_operator_notes = html.Div([
                 html.H3("GIV Operator Notes:"),
                 html.Pre(update_notes_table(notes_data))
-            ]) if not notes_data.empty else ""
+            ])
 
             return (f"File '{filename}' processed successfully", "",
                     fig, temp_fig, scatter_3d_fig, pie_fig, ma_fig, bubble_fig, injection_details, mix_summary, error_summary, giv_operator_notes, "")
@@ -792,7 +801,7 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
             print(f"Data retrieved successfully. Shape: {data.shape}")
             mixes_and_marsh = track_mixes_and_marsh_values(data)
             
-            fig, temp_fig, scatter_3d_fig, pie_fig, bubble_fig, _, notes_data = generate_interactive_graph(data)
+            fig, temp_fig, scatter_3d_fig, pie_fig, bubble_fig, _, _ = generate_interactive_graph(data)
             
             # Generate MA graph
             data_ma = apply_tma(data)
@@ -820,10 +829,12 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
             error_summary.extend([html.Span(error, style={'color': 'red'}) for error in mixes_and_marsh.get('Errors', [])] or ["NA"])
             error_summary = html.Div(error_summary)
 
+            # New code for handling notes
+            notes_data = extract_notes(data)
             giv_operator_notes = html.Div([
                 html.H3("GIV Operator Notes:"),
                 html.Pre(update_notes_table(notes_data))
-            ]) if not notes_data.empty else ""
+            ])
 
             return f"Data for {hole_id} {stage} loaded successfully", "", fig, temp_fig, scatter_3d_fig, pie_fig, ma_fig, bubble_fig, injection_details, mix_summary, error_summary, giv_operator_notes, ""
         except Exception as e:
