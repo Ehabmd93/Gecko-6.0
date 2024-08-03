@@ -173,10 +173,9 @@ def retrieve_processed_data(hole_id, stage):
         else:
             print(f"Retrieved {len(df)} rows for hole_id: {hole_id} and stage: {stage}")
         
-        float_columns = ['holeAngle', 'vmarshGrout', 'vmarshWater', 'RECORD', 'CumTimeMin', 'flow', 'AvgFlow', 'volume', 'gaugePressure', 'AvgGaugePressure', 'effPressure', 'AvgEffectivePressure', 'Lugeon', 'Batt_V', 'PTemp', 'holeNum', 'mixNum', 'waterTable', 'stageTop', 'stageBottom', 'gaugeHeight', 'waterDepth']
-        df[float_columns] = df[float_columns].apply(pd.to_numeric, errors='coerce')
-        
-        df['TIMESTAMP'] = pd.to_datetime(df['TIMESTAMP'])
+        # Ensure 'Notes' column is treated as string
+        if 'Notes' in df.columns:
+            df['Notes'] = df['Notes'].astype(str)
         
         return df
     except Exception as e:
@@ -229,8 +228,9 @@ def extract_notes(data):
         if 'Notes' not in data.columns:
             return pd.DataFrame(columns=['Timestamp', 'Note'])
 
-        notes_data = data[['TIMESTAMP', 'Notes']].dropna(subset=['Notes'])
-        notes_data = notes_data[notes_data['Notes'].str.strip() != '']
+        notes_data = data[['TIMESTAMP', 'Notes']].copy()
+        notes_data = notes_data[notes_data['Notes'].notna() & (notes_data['Notes'] != '')]
+        
         if notes_data.empty:
             return pd.DataFrame(columns=['Timestamp', 'Note'])
 
@@ -240,6 +240,24 @@ def extract_notes(data):
     except Exception as e:
         log_error(f"Error extracting notes: {e}")
         return pd.DataFrame(columns=['Timestamp', 'Note'])
+
+def update_notes_table(notes_data):
+    if notes_data is None or notes_data.empty:
+        return "No operator notes available."
+    
+    notes = [f"{row['Timestamp']} - {row['Note']}" for _, row in notes_data.iterrows()]
+    return "\n".join(notes) if notes else "No operator notes available."
+
+def store_processed_data(df, hole_id, stage):
+    try:
+        with engine.begin() as connection:
+            df['hole_id'] = hole_id
+            df['stage'] = stage
+            df['Notes'] = df['Notes'].fillna('').astype(str)
+            df.to_sql('processed_data', connection, if_exists='append', index=False, method='multi', chunksize=1000)
+        print(f"Data for {hole_id} {stage} stored successfully.")
+    except Exception as e:
+        log_error(f"Error storing processed data: {e}")
 
 def generate_interactive_graph(data):
     try:
