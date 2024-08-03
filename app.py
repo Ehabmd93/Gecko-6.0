@@ -35,7 +35,7 @@ def log_error(message):
 DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://qhbw_sql_vx26_user:glwGtA9yoGUtBrow7YdM9Ps80xNkGQIL@dpg-cqli5h08fa8c73aurv40-a.oregon-postgres.render.com/qhbw_sql_vx26')
 
 # Initialize SQLAlchemy engine with connection pooling
-engine = create_engine(DATABASE_URL, poolclass=QueuePool, pool_size=10, max_overflow=20)
+engine = create_engine(DATABASE_URL, poolclass=QueuePool, pool_size=20, max_overflow=40)
 Session = sessionmaker(bind=engine)
 session = Session()
 
@@ -46,9 +46,9 @@ metadata = MetaData()
 processed_data = Table(
     'processed_data', metadata,
     Column('id', Integer, primary_key=True),
-    Column('hole_id', String),
-    Column('stage', String),
-    Column('TIMESTAMP', TIMESTAMP),
+    Column('hole_id', String, index=True),
+    Column('stage', String, index=True),
+    Column('TIMESTAMP', TIMESTAMP, index=True),
     Column('RECORD', Float),
     Column('CumTimeMin', Float),
     Column('flow', Float),
@@ -88,7 +88,7 @@ def test_database_connection():
 # Call this function at the start of your app
 test_database_connection()
 
-# Function to get unique values from the database
+@lru_cache(maxsize=None)
 def get_unique_values(table_name, column_name, hole_id=None):
     try:
         with engine.connect() as connection:
@@ -107,7 +107,6 @@ def get_unique_values(table_name, column_name, hole_id=None):
         print(f"Error getting unique values: {e}")
         return []
 
-# Function to extract file details
 def extract_file_details(file_name):
     try:
         pattern = r'([PS]\d{4})_(S\d+(?:&\d+)?)'
@@ -119,7 +118,6 @@ def extract_file_details(file_name):
         print(f"Error extracting file details from {file_name}: {e}")
     return None, None
 
-# Function to clean data
 def clean_data(data):
     try:
         headers = [
@@ -129,92 +127,72 @@ def clean_data(data):
             'waterDepth', 'holeAngle', 'vmarshGrout', 'vmarshWater', 'Notes'
         ]
         
-        data = data.drop([0, 1, 2])
+        data = data.iloc[3:].reset_index(drop=True)
         data.columns = headers
-        data = data.drop(data.index[0])
-        data = data.reset_index(drop=True)
 
         data['TIMESTAMP'] = pd.to_datetime(data['TIMESTAMP'], errors='coerce')
         data = data.dropna(subset=['TIMESTAMP'])
 
-        numeric_columns = ['flow', 'AvgFlow', 'volume', 'gaugePressure', 'AvgGaugePressure', 
-                           'effPressure', 'AvgEffectivePressure', 'Lugeon', 'Batt_V', 'PTemp', 
-                           'holeNum', 'mixNum', 'waterTable', 'stageTop', 'stageBottom', 
-                           'gaugeHeight', 'waterDepth', 'holeAngle', 'vmarshGrout', 'vmarshWater']
-        for col in numeric_columns:
-            if col in data.columns:
-                data[col] = pd.to_numeric(data[col], errors='coerce')
+        numeric_columns = [col for col in data.columns if col not in ['TIMESTAMP', 'Notes']]
+        data[numeric_columns] = data[numeric_columns].apply(pd.to_numeric, errors='coerce')
 
         return data
     except Exception as e:
         print(f"Error cleaning data: {e}")
         return None
 
-# Function to parse file contents
 def parse_contents(contents, filename):
     content_type, content_string = contents.split(',')
     decoded = base64.b64decode(content_string)
     try:
         if 'csv' in filename:
             df = pd.read_csv(io.StringIO(decoded.decode('utf-8')))
-        elif 'xls' in filename or 'xlsx' in filename:
-            df = pd.read_excel(io.BytesIO(decoded), sheet_name='Raw Data', engine='openpyxl' if 'xlsx' in filename else 'xlrd')
+        elif 'xls' in filename:
+            df = pd.read_excel(io.BytesIO(decoded), engine='xlrd')
+        elif 'xlsx' in filename:
+            df = pd.read_excel(io.BytesIO(decoded), engine='openpyxl')
         else:
             raise ValueError("Unsupported file type")
+        
         cleaned_data = clean_data(df)
-        mixes_and_marsh = track_mixes_and_marsh_values(cleaned_data)
         hole_id, stage = extract_file_details(filename)
+        mixes_and_marsh = track_mixes_and_marsh_values(cleaned_data)
         return cleaned_data, mixes_and_marsh, hole_id, stage
     except Exception as e:
         print(f"Error parsing file: {e}")
         return None, None, None, None
 
-# Function to store processed data into the database
 def store_processed_data(df, hole_id, stage):
     try:
-        records = df.to_dict(orient='records')
-        for record in records:
-            record['hole_id'] = hole_id
-            record['stage'] = stage
-            insert_stmt = processed_data.insert().values(**record)
-            session.execute(insert_stmt)
-        session.commit()
+        df['hole_id'] = hole_id
+        df['stage'] = stage
+        df.to_sql('processed_data', engine, if_exists='append', index=False, method='multi', chunksize=1000)
         print(f"Data for {hole_id} {stage} stored successfully.")
     except Exception as e:
-        session.rollback()
         print(f"Error storing processed data: {e}")
 
-# Function to retrieve processed data from the database
+@lru_cache(maxsize=32)
 def retrieve_processed_data(hole_id, stage):
     try:
+        query = select(processed_data).where(
+            (processed_data.c.hole_id == hole_id) & 
+            (processed_data.c.stage == stage)
+        ).order_by(processed_data.c.TIMESTAMP)
+        
         with engine.connect() as connection:
-            query = text("""
-                SELECT * FROM processed_data 
-                WHERE hole_id = :hole_id AND stage = :stage
-                ORDER BY "TIMESTAMP"
-            """)
-            result = connection.execute(query, {"hole_id": hole_id, "stage": stage})
-            df = pd.DataFrame(result.fetchall())
-            if df.empty:
-                print(f"No data found for hole_id: {hole_id} and stage: {stage}")
-            else:
-                print(f"Retrieved {len(df)} rows for hole_id: {hole_id} and stage: {stage}")
-                
-            # Convert columns to appropriate data types
-            float_columns = ['holeAngle', 'vmarshGrout', 'vmarshWater', 'RECORD', 'CumTimeMin', 'flow', 'AvgFlow', 'volume', 'gaugePressure', 'AvgGaugePressure', 'effPressure', 'AvgEffectivePressure', 'Lugeon', 'Batt_V', 'PTemp', 'holeNum', 'mixNum', 'waterTable', 'stageTop', 'stageBottom', 'gaugeHeight', 'waterDepth']
-            for col in float_columns:
-                if col in df.columns:
-                    df[col] = pd.to_numeric(df[col], errors='coerce')
-            
-            if 'TIMESTAMP' in df.columns:
-                df['TIMESTAMP'] = pd.to_datetime(df['TIMESTAMP'])
-            
-            return df
+            result = connection.execute(query)
+            df = pd.DataFrame(result.fetchall(), columns=result.keys())
+        
+        if df.empty:
+            print(f"No data found for hole_id: {hole_id} and stage: {stage}")
+        else:
+            print(f"Retrieved {len(df)} rows for hole_id: {hole_id} and stage: {stage}")
+        
+        return df
     except Exception as e:
         print(f"Error retrieving processed data: {e}")
         return None
 
-# Function to track mixes and marsh values
 def track_mixes_and_marsh_values(data):
     mix_counts = {'A': 0, 'B': 0, 'C': 0, 'D': 0}
     marsh_values = {'A': None, 'B': None, 'C': None, 'D': None}
@@ -222,7 +200,6 @@ def track_mixes_and_marsh_values(data):
     current_mix = 'A'
 
     for i, row in data.iterrows():
-        timestamp = row['TIMESTAMP']
         mix_num = row['mixNum']
         marsh_value = row['vmarshGrout']
 
@@ -250,7 +227,6 @@ def track_mixes_and_marsh_values(data):
         'Cumulative Zero Flow': zero_flow_interval
     }
 
-# Function to identify marsh changes
 def identify_marsh_changes(data):
     try:
         marsh_changes = data[data['vmarshGrout'].diff() != 0]
@@ -260,7 +236,6 @@ def identify_marsh_changes(data):
         print(f"Error identifying Marsh changes: {e}")
         return pd.DataFrame(columns=['TIMESTAMP', 'mixNum', 'vmarshGrout', 'flow'])
 
-# Function to extract notes
 def extract_notes(data):
     try:
         if 'Notes' not in data.columns:
@@ -278,11 +253,10 @@ def extract_notes(data):
         print(f"Error extracting notes: {e}")
         return pd.DataFrame(columns=['Timestamp', 'Note'])
 
-# Function to generate interactive graph
 def generate_interactive_graph(data):
     try:
         if data is None or data.empty:
-            return None, None, None, None, None, None, None
+            return None, None, None, None, None, None, None, None
 
         marsh_changes = identify_marsh_changes(data)
         notes_data = extract_notes(data)
@@ -426,7 +400,6 @@ def generate_interactive_graph(data):
         print(f"Error generating interactive graph: {e}")
         return None, None, None, None, None, None, None, None
 
-# Helper function to add trace to figure
 def add_trace(fig, data, name, y_col, color, yaxis='y'):
     fig.add_trace(go.Scatter(
         x=data['ElapsedMinutes'],
@@ -440,7 +413,6 @@ def add_trace(fig, data, name, y_col, color, yaxis='y'):
         yaxis=yaxis
     ))
 
-# Function to calculate cumulative zero flow
 def calculate_cumulative_zero_flow(data):
     try:
         zero_flow_intervals = []
@@ -463,7 +435,6 @@ def calculate_cumulative_zero_flow(data):
         print(f"Error calculating cumulative zero flow: {e}")
         return 0
 
-# Function to calculate grout and mix volumes
 def calculate_grout_and_mix_volumes(data):
     try:
         cumulative_grout = data['volume'].iloc[-1]
@@ -492,7 +463,6 @@ def calculate_grout_and_mix_volumes(data):
         print(f"Error calculating grout and mix volumes: {e}")
         return 0, 0, 0, 0, 0
 
-# Function to update injection details
 def update_injection_details(data, selected_stage, selected_hole_id):
     try:
         non_zero_flow = data[data['flow'] > 0]
@@ -560,7 +530,6 @@ def update_injection_details(data, selected_stage, selected_hole_id):
         print(f"Error updating injection details: {e}")
         return "Error updating injection details"
 
-# Function to update notes table
 def update_notes_table(notes_data):
     try:
         if notes_data is None or notes_data.empty:
@@ -571,7 +540,6 @@ def update_notes_table(notes_data):
         print(f"Error updating notes table: {e}")
         return ""
 
-# Function to apply Triangular Moving Average
 def apply_tma(data, window_size=5):
     weights = np.arange(1, window_size + 1)
     weights = np.concatenate([weights, weights[:-1][::-1]])
@@ -582,7 +550,6 @@ def apply_tma(data, window_size=5):
     
     return data
 
-# Function to generate stage standing chart
 def generate_stage_standing_chart(data, selected_stage):
     try:
         # Get all stages for the current hole_id
