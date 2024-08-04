@@ -504,7 +504,6 @@ app.layout = html.Div([
             html.H1("Grout Gecko V-1.0", style={'fontSize': '48px', 'fontWeight': 'bold', 'color': 'black', 'margin': '0'}),
             html.H3("QHBW Grouting Data QC, Plotter, and Deep Analysis Tool", style={'margin': '0'})
         ], style={'flex': '1'}),
-        html.Img(src=f'data:image/jpg;base64,{encoded_logo}', style={'height': '100px', 'width': 'auto'}) if encoded_logo else html.Div()
     ], style={'display': 'flex', 'alignItems': 'center', 'justifyContent': 'space-between', 'marginBottom': '20px'}),
      
     html.Button('Bug Report/Feedback', id='bug-report-button', n_clicks=0, style={'marginBottom': '20px'}),
@@ -732,7 +731,7 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
                 error_message = f"No data found for Hole ID: {hole_id} and Stage: {stage}"
                 log_error(error_message)
                 return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
-            
+
             print(f"Data retrieved successfully. Shape: {data.shape}")
             mixes_and_marsh = track_mixes_and_marsh_values(data)
             
