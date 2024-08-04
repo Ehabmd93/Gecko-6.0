@@ -15,12 +15,9 @@ import os
 import time
 import json
 from functools import lru_cache
-
-# SQLAlchemy imports
 from sqlalchemy import create_engine, Table, Column, Integer, String, MetaData, Float, TIMESTAMP, select, func, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import QueuePool
-
 import logging
 
 logging.basicConfig(filename='app_errors.log', level=logging.ERROR, 
@@ -367,37 +364,6 @@ def generate_interactive_graph(data):
         add_trace(lugeon_fig, data, 'Lugeon', 'Lugeon', 'black')
         add_trace(lugeon_fig, data, 'Effective Pressure', 'effPressure', 'green', yaxis='y2')
 
-        # Detect refusal trend
-        data['rolling_lugeon'] = data['Lugeon'].rolling(window=12, min_periods=1).mean()  # 2 minutes (assuming 10-second intervals)
-        refusal_periods = data[data['rolling_lugeon'] <= 3.3]
-
-        if not refusal_periods.empty:
-            refusal_start = refusal_periods.index[0]
-            refusal_end = refusal_periods.index[-1]
-            lugeon_fig.add_shape(
-                type="rect",
-                x0=data.loc[refusal_start, 'ElapsedMinutes'],
-                x1=data.loc[refusal_end, 'ElapsedMinutes'],
-                y0=0,
-                y1=data['Lugeon'].max(),
-                fillcolor="red",
-                opacity=0.2,
-                layer="below",
-                line_width=0,
-            )
-            lugeon_fig.add_annotation(
-                x=(data.loc[refusal_start, 'ElapsedMinutes'] + data.loc[refusal_end, 'ElapsedMinutes']) / 2,
-                y=data['Lugeon'].max(),
-                text="Refusal trend detected",
-                showarrow=True,
-                arrowhead=2,
-                arrowsize=1,
-                arrowwidth=2,
-                arrowcolor="red",
-                font=dict(size=12, color="red"),
-                align="center",
-            )
-
         lugeon_fig.update_layout(
             title='Lugeon and Effective Pressure vs Time',
             xaxis_title='Time Elapsed (Minutes)',
@@ -569,6 +535,15 @@ def apply_tma(data, window_size=5):
     
     return data
 
+def calculate_stage_volumes():
+    try:
+        query = text("SELECT stage, SUM(volume) as total_volume FROM processed_data GROUP BY stage ORDER BY total_volume")
+        df = pd.read_sql_query(query, engine)
+        return df
+    except Exception as e:
+        log_error(f"Error calculating stage volumes: {e}")
+        return pd.DataFrame(columns=['stage', 'total_volume'])
+
 # Load and encode the Gecko logo
 encoded_logo = None
 try:
@@ -634,6 +609,7 @@ app.layout = html.Div([
     html.Button('Show/Hide Pie Chart', id='toggle-pie-chart-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
     html.Button('Show/Hide Noise Reduction (MA)', id='toggle-ma-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
     html.Button('Show/Hide Lugeon', id='toggle-lugeon-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
+    html.Button('Show Stage Volumes', id='show-stage-volumes-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20}),
     
     dcc.Loading(
         id="loading",
@@ -646,6 +622,7 @@ app.layout = html.Div([
             dcc.Graph(id='pie-chart', style={'display': 'none'}),
             dcc.Graph(id='ma-graph', style={'display': 'none'}),
             dcc.Graph(id='lugeon-graph', style={'display': 'none'}),
+            dcc.Graph(id='stage-volumes-graph', style={'marginTop': 20}),
         ]
     ),
     
@@ -810,7 +787,7 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
                 error_message = f"No data found for Hole ID: {hole_id} and Stage: {stage}"
                 log_error(error_message)
                 return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
-            
+
             print(f"Data retrieved successfully. Shape: {data.shape}")
             mixes_and_marsh = track_mixes_and_marsh_values(data)
             
@@ -854,6 +831,57 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
             return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
 
     raise PreventUpdate
+
+# New Callback to show stage volumes
+@app.callback(
+    Output('stage-volumes-graph', 'figure'),
+    Input('show-stage-volumes-button', 'n_clicks'),
+    State('hole-id-dropdown', 'value'),
+    State('stage-dropdown', 'value')
+)
+def show_stage_volumes(n_clicks, hole_id, selected_stage):
+    if n_clicks is None or not hole_id or not selected_stage:
+        raise PreventUpdate
+    
+    df = calculate_stage_volumes()
+    if df.empty:
+        return {}
+
+    selected_stage_volume = df.loc[df['stage'] == selected_stage, 'total_volume'].values[0]
+    left_stages = df[df['total_volume'] < selected_stage_volume]
+    right_stages = df[df['total_volume'] > selected_stage_volume]
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Bar(
+        x=left_stages['stage'],
+        y=left_stages['total_volume'],
+        name='Less Grout Intake',
+        marker_color='rgba(222,45,38,0.8)'
+    ))
+
+    fig.add_trace(go.Bar(
+        x=[selected_stage],
+        y=[selected_stage_volume],
+        name='Selected Stage',
+        marker_color='rgba(55,128,191,0.8)'
+    ))
+
+    fig.add_trace(go.Bar(
+        x=right_stages['stage'],
+        y=right_stages['total_volume'],
+        name='More Grout Intake',
+        marker_color='rgba(50,171,96,0.8)'
+    ))
+
+    fig.update_layout(
+        title='Stage Total Grout Volume Intake',
+        xaxis_title='Stage',
+        yaxis_title='Total Volume',
+        barmode='stack'
+    )
+
+    return fig
 
 # Callbacks to show/hide additional plots
 @app.callback(
