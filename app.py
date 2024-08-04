@@ -367,11 +367,17 @@ def generate_interactive_graph(data):
         add_trace(lugeon_fig, data, 'Lugeon', 'Lugeon', 'black')
         add_trace(lugeon_fig, data, 'Effective Pressure', 'effPressure', 'green', yaxis='y2')
 
-        # Detect refusal trend
-        data['rolling_lugeon'] = data['Lugeon'].rolling(window=12, min_periods=1).mean()  # 2 minutes (assuming 10-second intervals)
-        refusal_periods = data[data['rolling_lugeon'] <= 3.3]
+        # New modification: Detect refusal trend and GDV/Wiggle Check
+        data['rolling_lugeon'] = data['Lugeon'].rolling(window=18, min_periods=1).mean()  # 3 minutes (assuming 10-second intervals)
+        data['non_zero_flow'] = data['flow'] > 0
+        data['flow_period'] = data['non_zero_flow'].cumsum()
 
-        if not refusal_periods.empty:
+        refusal_periods = data[(data['rolling_lugeon'] <= 3.5) & (data['rolling_lugeon'] > 0) & (data['flow_period'].diff() >= 24)]  # 4 minutes of flow before
+        zero_flow_periods = data[data['flow'] == 0]
+
+        total_grouting_time = (data['TIMESTAMP'].max() - data['TIMESTAMP'].min()).total_seconds() / 3600  # in hours
+
+        if not refusal_periods.empty and total_grouting_time >= 1:
             refusal_start = refusal_periods.index[0]
             refusal_end = refusal_periods.index[-1]
             lugeon_fig.add_shape(
@@ -397,6 +403,32 @@ def generate_interactive_graph(data):
                 font=dict(size=12, color="red"),
                 align="center",
             )
+
+        # New modification: Detect and annotate GDV/Wiggle Check periods
+        if total_grouting_time >= 1:
+            zero_flow_groups = zero_flow_periods.groupby((zero_flow_periods.index.to_series().diff() != 1).cumsum())
+            for _, group in zero_flow_groups:
+                zero_flow_duration = (group.index[-1] - group.index[0]).total_seconds() / 60  # in minutes
+                if zero_flow_duration >= 10:
+                    lugeon_fig.add_shape(
+                        type="rect",
+                        x0=data.loc[group.index[0], 'ElapsedMinutes'],
+                        x1=data.loc[group.index[-1], 'ElapsedMinutes'],
+                        y0=0,
+                        y1=data['Lugeon'].max(),
+                        fillcolor="yellow",
+                        opacity=0.2,
+                        layer="below",
+                        line_width=0,
+                    )
+                    lugeon_fig.add_annotation(
+                        x=(data.loc[group.index[0], 'ElapsedMinutes'] + data.loc[group.index[-1], 'ElapsedMinutes']) / 2,
+                        y=data['Lugeon'].max() / 2,
+                        text="Waiting for GDV / Wiggle Check",
+                        showarrow=False,
+                        font=dict(size=10, color="orange"),
+                        align="center",
+                    )
 
         lugeon_fig.update_layout(
             title='Lugeon and Effective Pressure vs Time',
