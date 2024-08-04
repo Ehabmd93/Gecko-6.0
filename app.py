@@ -263,7 +263,7 @@ def update_notes_table(notes_data):
 def generate_interactive_graph(data):
     try:
         if data is None or data.empty:
-            return None, None, None, None, None, None, None
+            return None, None, None, None, None, None
 
         marsh_changes = identify_marsh_changes(data)
         notes_data = extract_notes(data)
@@ -362,29 +362,10 @@ def generate_interactive_graph(data):
         )])
         pie_fig.update_layout(title='Mix Volumes')
 
-        # Create Lugeon plot
-        lugeon_fig = go.Figure()
-        add_trace(lugeon_fig, data, 'Lugeon', 'Lugeon', 'black')
-        add_trace(lugeon_fig, data, 'Effective Pressure', 'effPressure', 'green', yaxis='y2')
-        lugeon_fig.update_layout(
-            title='Lugeon Value and Effective Pressure vs Time',
-            xaxis_title='Time Elapsed (Minutes)',
-            yaxis=dict(title='Lugeon', side='left'),
-            yaxis2=dict(title='Effective Pressure (bar)', overlaying='y', side='right'),
-            hovermode='x unified'
-        )
-        lugeon_fig.update_xaxes(
-            tickvals=[(t - start_time).total_seconds() / 60 for t in time_ticks],
-            ticktext=[t.strftime('%H:%M') for t in time_ticks]
-        )
-
-        # Create grout intake comparison bar chart
-        grout_intake_fig, grout_intake_message = create_grout_intake_comparison(data, hole_id, data['stage'].iloc[0])
-
-        return fig, temp_fig, scatter_3d_fig, pie_fig, lugeon_fig, grout_intake_fig, grout_intake_message, data, notes_data
+        return fig, temp_fig, scatter_3d_fig, pie_fig, data, notes_data
     except Exception as e:
         log_error(f"Error generating interactive graph: {e}")
-        return None, None, None, None, None, None, None, None, None
+        return None, None, None, None, None, None
 
 def add_trace(fig, data, name, y_col, color, yaxis='y'):
     fig.add_trace(go.Scatter(
@@ -441,57 +422,112 @@ def calculate_grout_and_mix_volumes(data):
         log_error(f"Error calculating grout and mix volumes: {e}")
         return 0, 0, 0, 0, 0
 
-def create_grout_intake_comparison(data, hole_id, stage):
+def update_injection_details(data, selected_stage, selected_hole_id):
     try:
-        # Get total grout intake for the current stage
-        current_stage_intake = data['volume'].iloc[-1]
+        # Data validation checks
+        print(f"Debug: Data shape: {data.shape}")
+        print(f"Debug: Columns: {data.columns.tolist()}")
+        print(f"Debug: Flow column dtype: {data['flow'].dtype}")
+        print(f"Debug: Flow column range: {data['flow'].min()} to {data['flow'].max()}")
+        print(f"Debug: Timestamp range: {data['TIMESTAMP'].min()} to {data['TIMESTAMP'].max()}")
+        
+        # Check for negative flows
+        negative_flows = data[data['flow'] < 0]
+        if not negative_flows.empty:
+            print(f"Warning: Negative flows detected: {len(negative_flows)} rows")
 
-        # Query database for grout intake of all stages
-        query = text("""
-            SELECT hole_id, stage, MAX(volume) as total_volume
-            FROM processed_data
-            GROUP BY hole_id, stage
-            ORDER BY total_volume DESC
-        """)
-        with engine.connect() as connection:
-            result = connection.execute(query)
-            all_stages_intake = pd.DataFrame(result.fetchall(), columns=['hole_id', 'stage', 'total_volume'])
+        # Check for duplicate timestamps
+        duplicate_timestamps = data[data.duplicated('TIMESTAMP', keep=False)]
+        if not duplicate_timestamps.empty:
+            print(f"Warning: Duplicate timestamps detected: {len(duplicate_timestamps)} rows")
 
-        # Find the rank of the current stage
-        all_stages_intake['rank'] = all_stages_intake['total_volume'].rank(method='min', ascending=False)
-        current_stage_rank = all_stages_intake[(all_stages_intake['hole_id'] == hole_id) & (all_stages_intake['stage'] == stage)]['rank'].values[0]
+        data['TIMESTAMP'] = pd.to_datetime(data['TIMESTAMP'])
+        non_zero_flow = data[data['flow'] > 0]
+        first_non_zero_flow_time = non_zero_flow['TIMESTAMP'].min()
+        last_timestamp = data['TIMESTAMP'].max()
 
-        # Get 2 stages with more intake and 2 with less intake
-        higher_intake = all_stages_intake[all_stages_intake['total_volume'] > current_stage_intake].head(2)
-        lower_intake = all_stages_intake[all_stages_intake['total_volume'] < current_stage_intake].tail(2)
-        comparison_stages = pd.concat([higher_intake, lower_intake, all_stages_intake[(all_stages_intake['hole_id'] == hole_id) & (all_stages_intake['stage'] == stage)]])
+        stage_top = data.loc[data['TIMESTAMP'].idxmin(), 'stageTop']
+        stage_bottom = data.loc[data['TIMESTAMP'].idxmin(), 'stageBottom']
+        stage_length = stage_bottom - stage_top
 
-        # Create bar chart
-        fig = go.Figure(data=[
-            go.Bar(
-                x=[f"{row['hole_id']}_{row['stage']}" for _, row in comparison_stages.iterrows()],
-                y=comparison_stages['total_volume'],
-                text=comparison_stages['total_volume'].round(2),
-                textposition='auto',
-                marker_color=['blue' if (row['hole_id'] != hole_id or row['stage'] != stage) else 'red' for _, row in comparison_stages.iterrows()]
-            )
-        ])
+        first_date = first_non_zero_flow_time.strftime('%Y-%m-%d')
+        first_time = first_non_zero_flow_time.strftime('%H:%M:%S')
+        last_date = last_timestamp.strftime('%Y-%m-%d')
+        last_time = last_timestamp.strftime('%H:%M:%S')
 
-        fig.update_layout(
-            title='Grout Intake Comparison',
-            xaxis_title='Hole ID_Stage',
-            yaxis_title='Total Grout Intake (L)',
-            showlegend=False
-        )
+        mix_a_volume, mix_b_volume, mix_c_volume, mix_d_volume, cumulative_volume = calculate_grout_and_mix_volumes(data)
 
-        # Create message
-        total_stages = len(all_stages_intake)
-        message = f"Stage {stage}_{hole_id} is ranked {int(current_stage_rank)} out of {total_stages} in grout intake."
+        total_grouting_time = (last_timestamp - first_non_zero_flow_time).total_seconds() / 3600
+        zero_flow_interval = calculate_cumulative_zero_flow(data)
+        net_grouting_time = total_grouting_time - zero_flow_interval
 
-        return fig, message
+        print(f"Debug: Total grouting time: {total_grouting_time:.2f} hours")
+        print(f"Debug: Zero flow interval: {zero_flow_interval:.2f} hours")
+        print(f"Debug: Net grouting time: {net_grouting_time:.2f} hours")
+
+        water_depth = data['waterDepth'].iloc[0]
+        v_marsh_water = data['vmarshWater'].iloc[0]
+
+        details = [
+            html.H2("Grout Injection Summary"),
+            html.B("Hole ID: "), html.Span(f"{selected_hole_id}", style={'color': 'red', 'font-weight': 'bold'}),
+            html.Br(),
+            html.B("Stage: "), html.Span(f"{selected_stage}", style={'color': 'red', 'font-weight': 'bold'}),
+            html.Br(),
+            html.B("Commencement Date/ Time: "), html.Span(f"{first_date} at {first_time}", style={'color': 'red', 'font-weight': 'bold'}),
+            html.Br(),
+            html.B("Completion Date/ Time: "), html.Span(f"{last_date} at {last_time}", style={'color': 'red', 'font-weight': 'bold'}),
+            html.Br(),
+            html.B("Stage Top: "), html.Span(f"{stage_top} meters", style={'color': 'red', 'font-weight': 'bold'}),
+            html.Br(),
+            html.B("Stage Bottom: "), html.Span(f"{stage_bottom} meters", style={'color': 'red', 'font-weight': 'bold'}),
+            html.Br(),
+            html.B("Stage Length: "), html.Span(f"{stage_length:.2f} meters", style={'color': 'red', 'font-weight': 'bold'}),
+            html.Br(),
+            html.B(f"Mix A: "), html.Span(f"{mix_a_volume:.2f} L", style={'color': 'red', 'font-weight': 'bold'}),
+            html.Br(),
+            html.B(f"Mix B: "), html.Span(f"{mix_b_volume:.2f} L", style={'color': 'red', 'font-weight': 'bold'}),
+            html.Br(),
+            html.B(f"Mix C: "), html.Span(f"{mix_c_volume:.2f} L", style={'color': 'red', 'font-weight': 'bold'}),
+            html.Br(),
+            html.B(f"Mix D: "), html.Span(f"{mix_d_volume:.2f} L", style={'color': 'red', 'font-weight': 'bold'}),
+            html.Br(),
+            html.B(f"Cumulative Volume: "), html.Span(f"{cumulative_volume:.2f} L", style={'color': 'red', 'font-weight': 'bold'}),
+            html.Br(),
+            html.B("Total Grouting Time: "), html.Span(f"{total_grouting_time:.2f} hours", style={'color': 'red', 'font-weight': 'bold'}),
+            html.Br(),
+            html.B("Net Grouting Time: "), html.Span(f"{net_grouting_time:.2f} hours", style={'color': 'red', 'font-weight': 'bold'}),
+            html.Br(),
+            html.B("Cumulative Zero Flow: "), html.Span(f"{zero_flow_interval:.2f} hours", style={'color': 'red', 'font-weight': 'bold'}),
+            html.Br(),
+            html.B("Water Table: "), html.Span(f"{water_depth:.2f} meters" if water_depth is not None else "N/A", style={'color': 'red', 'font-weight': 'bold'}),
+            html.Br(),
+            html.B("V water: "), html.Span(f"{v_marsh_water:.2f} {'(reported correctly)' if 25.6 <= v_marsh_water <= 26.8 else ''}" if v_marsh_water is not None else "N/A", style={'color': 'red', 'font-weight': 'bold'}),
+            html.Br(),
+        ]
+
+        return html.Div(details)
     except Exception as e:
-        log_error(f"Error creating grout intake comparison: {e}")
-        return None, "Error in grout intake comparison"
+        log_error(f"Error updating injection details: {e}")
+        return "Error updating injection details"
+
+def apply_tma(data, window_size=5):
+    weights = np.arange(1, window_size + 1)
+    weights = np.concatenate([weights, weights[:-1][::-1]])
+    weights = weights / np.sum(weights)
+    
+    data['flow_tma'] = data['flow'].rolling(window=len(weights), center=True).apply(lambda x: np.sum(weights * x), raw=False)
+    data['effPressure_tma'] = data['effPressure'].rolling(window=len(weights), center=True).apply(lambda x: np.sum(weights * x), raw=False)
+    
+    return data
+
+# Load and encode the Gecko logo
+encoded_logo = None
+try:
+    with open('Lizard_Logo.jpg', 'rb') as f:
+        encoded_logo = base64.b64encode(f.read()).decode('ascii')
+except FileNotFoundError:
+    print("Logo file 'Lizard_Logo.jpg' not found. The app will run without the logo.")
 
 # Initialize Dash app
 app = Dash(__name__, suppress_callback_exceptions=True)
@@ -504,6 +540,7 @@ app.layout = html.Div([
             html.H1("Grout Gecko V-1.0", style={'fontSize': '48px', 'fontWeight': 'bold', 'color': 'black', 'margin': '0'}),
             html.H3("QHBW Grouting Data QC, Plotter, and Deep Analysis Tool", style={'margin': '0'})
         ], style={'flex': '1'}),
+        html.Img(src=f'data:image/jpg;base64,{encoded_logo}', style={'height': '100px', 'width': 'auto'}) if encoded_logo else html.Div()
     ], style={'display': 'flex', 'alignItems': 'center', 'justifyContent': 'space-between', 'marginBottom': '20px'}),
      
     html.Button('Bug Report/Feedback', id='bug-report-button', n_clicks=0, style={'marginBottom': '20px'}),
@@ -548,8 +585,6 @@ app.layout = html.Div([
     html.Button('Show/Hide 3D Scatter', id='toggle-3d-scatter-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
     html.Button('Show/Hide Pie Chart', id='toggle-pie-chart-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
     html.Button('Show/Hide Noise Reduction (MA)', id='toggle-ma-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
-    html.Button('Show/Hide Lugeon', id='toggle-lugeon-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
-    html.Button('Show/Hide Grout Intake Comparison', id='toggle-grout-intake-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
     
     dcc.Loading(
         id="loading",
@@ -561,9 +596,6 @@ app.layout = html.Div([
             dcc.Graph(id='scatter-3d-plot', style={'display': 'none'}),
             dcc.Graph(id='pie-chart', style={'display': 'none'}),
             dcc.Graph(id='ma-graph', style={'display': 'none'}),
-            dcc.Graph(id='lugeon-graph', style={'display': 'none'}),
-            dcc.Graph(id='grout-intake-graph', style={'display': 'none'}),
-            html.Div(id='grout-intake-message', style={'marginTop': 10, 'fontWeight': 'bold'}),
         ]
     ),
     
@@ -657,9 +689,6 @@ def display_click_data(clickData):
      Output('scatter-3d-plot', 'figure'),
      Output('pie-chart', 'figure'),
      Output('ma-graph', 'figure'),
-     Output('lugeon-graph', 'figure'),
-     Output('grout-intake-graph', 'figure'),
-     Output('grout-intake-message', 'children'),
      Output('injection-details', 'children'),
      Output('mix-summary', 'children'),
      Output('error-summary', 'children'),
@@ -682,7 +711,7 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
             if df is None:
                 raise ValueError("Error parsing file contents")
 
-            fig, temp_fig, scatter_3d_fig, pie_fig, lugeon_fig, grout_intake_fig, grout_intake_message, data, notes_data = generate_interactive_graph(df)
+            fig, temp_fig, scatter_3d_fig, pie_fig, data, notes_data = generate_interactive_graph(df)
             
             # Generate MA graph
             df_ma = apply_tma(df)
@@ -716,12 +745,11 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
             ]) if not notes_data.empty else ""
 
             return (f"File '{filename}' processed successfully", "",
-                    fig, temp_fig, scatter_3d_fig, pie_fig, ma_fig, lugeon_fig, grout_intake_fig, grout_intake_message,
-                    injection_details, mix_summary, error_summary, giv_operator_notes, "")
+                    fig, temp_fig, scatter_3d_fig, pie_fig, ma_fig, injection_details, mix_summary, error_summary, giv_operator_notes, "")
         except Exception as e:
             error_message = f"Error processing file: {str(e)}"
             log_error(error_message)
-            return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
+            return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
 
     elif trigger_id == 'load-data-button' and hole_id and stage:
         try:
@@ -730,12 +758,12 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
             if data is None or data.empty:
                 error_message = f"No data found for Hole ID: {hole_id} and Stage: {stage}"
                 log_error(error_message)
-                return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
-
+                return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
+            
             print(f"Data retrieved successfully. Shape: {data.shape}")
             mixes_and_marsh = track_mixes_and_marsh_values(data)
             
-            fig, temp_fig, scatter_3d_fig, pie_fig, lugeon_fig, grout_intake_fig, grout_intake_message, _, notes_data = generate_interactive_graph(data)
+            fig, temp_fig, scatter_3d_fig, pie_fig, _, notes_data = generate_interactive_graph(data)
             
             # Generate MA graph
             data_ma = apply_tma(data)
@@ -768,11 +796,11 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
                 html.Pre(update_notes_table(notes_data))
             ]) if not notes_data.empty else ""
 
-            return f"Data for {hole_id} {stage} loaded successfully", "", fig, temp_fig, scatter_3d_fig, pie_fig, ma_fig, lugeon_fig, grout_intake_fig, grout_intake_message, injection_details, mix_summary, error_summary, giv_operator_notes, ""
+            return f"Data for {hole_id} {stage} loaded successfully", "", fig, temp_fig, scatter_3d_fig, pie_fig, ma_fig, injection_details, mix_summary, error_summary, giv_operator_notes, ""
         except Exception as e:
             error_message = f"Error loading data: {str(e)}"
             log_error(error_message)
-            return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
+            return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
 
     raise PreventUpdate
 
@@ -813,24 +841,6 @@ def toggle_ma_graph(n_clicks):
         return {'display': 'none'}
     return {'display': 'block' if n_clicks % 2 == 1 else 'none'}
 
-@app.callback(
-    Output('lugeon-graph', 'style'),
-    [Input('toggle-lugeon-button', 'n_clicks')]
-)
-def toggle_lugeon_graph(n_clicks):
-    if n_clicks is None:
-        return {'display': 'none'}
-    return {'display': 'block' if n_clicks % 2 == 1 else 'none'}
-
-@app.callback(
-    Output('grout-intake-graph', 'style'),
-    [Input('toggle-grout-intake-button', 'n_clicks')]
-)
-def toggle_grout_intake_graph(n_clicks):
-    if n_clicks is None:
-        return {'display': 'none'}
-    return {'display': 'block' if n_clicks % 2 == 1 else 'none'}
-
 # Callback for bug report/feedback button
 @app.callback(
     Output("bug-report-button", "n_clicks"),
@@ -852,9 +862,6 @@ def open_email_client(n_clicks):
      State('scatter-3d-plot', 'figure'),
      State('pie-chart', 'figure'),
      State('ma-graph', 'figure'),
-     State('lugeon-graph', 'figure'),
-     State('grout-intake-graph', 'figure'),
-     State('grout-intake-message', 'children'),
      State('injection-details', 'children'),
      State('mix-summary', 'children'),
      State('error-summary', 'children'),
@@ -862,7 +869,7 @@ def open_email_client(n_clicks):
      State('recipe-table', 'data'),
      State('qc-by-input', 'value')]
 )
-def print_report(n_clicks, figure, temp_figure, scatter_3d_figure, pie_figure, ma_figure, lugeon_figure, grout_intake_figure, grout_intake_message, injection_details, mix_summary, error_summary, giv_operator_notes, recipe_table_data, qc_by):
+def print_report(n_clicks, figure, temp_figure, scatter_3d_figure, pie_figure, ma_figure, injection_details, mix_summary, error_summary, giv_operator_notes, recipe_table_data, qc_by):
     if n_clicks > 0:
         try:
             # Convert the figures to HTML divs
@@ -871,8 +878,6 @@ def print_report(n_clicks, figure, temp_figure, scatter_3d_figure, pie_figure, m
             scatter_3d_plot_div = pio.to_html(scatter_3d_figure, full_html=False)
             pie_chart_div = pio.to_html(pie_figure, full_html=False)
             ma_plot_div = pio.to_html(ma_figure, full_html=False)
-            lugeon_plot_div = pio.to_html(lugeon_figure, full_html=False)
-            grout_intake_plot_div = pio.to_html(grout_intake_figure, full_html=False)
 
             # Convert recipe table to HTML
             recipe_table_html = """
@@ -941,15 +946,6 @@ def print_report(n_clicks, figure, temp_figure, scatter_3d_figure, pie_figure, m
                     <div class="section">
                         <h2>Noise Reduction (Moving Average) Graph</h2>
                         {ma_plot_div}
-                    </div>
-                    <div class="section">
-                        <h2>Lugeon Value and Effective Pressure Graph</h2>
-                        {lugeon_plot_div}
-                    </div>
-                    <div class="section">
-                        <h2>Grout Intake Comparison</h2>
-                        {grout_intake_plot_div}
-                        <p>{grout_intake_message}</p>
                     </div>
                     <div class="section">
                         <h2>Recipe Table</h2>
