@@ -154,6 +154,7 @@ def store_processed_data(df, hole_id, stage):
         with engine.begin() as connection:
             df['hole_id'] = hole_id
             df['stage'] = stage
+            df['Notes'] = df['Notes'].replace({'NaN': '', 'nan': ''}).fillna('')
             df.to_sql('processed_data', connection, if_exists='append', index=False, method='multi', chunksize=1000)
         print(f"Data for {hole_id} {stage} stored successfully.")
     except Exception as e:
@@ -229,7 +230,6 @@ def extract_notes(data):
             return pd.DataFrame(columns=['Timestamp', 'Note'])
 
         notes_data = data[['TIMESTAMP', 'Notes']].copy()
-        # Filter out 'NaN' strings, null values, and empty strings
         notes_data = notes_data[
             (notes_data['Notes'].notna()) & 
             (notes_data['Notes'] != '') & 
@@ -260,22 +260,10 @@ def update_notes_table(notes_data):
     
     return "\n".join(f"{timestamp} - {note}" for timestamp, note in valid_notes)
 
-def store_processed_data(df, hole_id, stage):
-    try:
-        with engine.begin() as connection:
-            df['hole_id'] = hole_id
-            df['stage'] = stage
-            # Replace 'NaN' strings with empty string
-            df['Notes'] = df['Notes'].replace({'NaN': '', 'nan': ''}).fillna('')
-            df.to_sql('processed_data', connection, if_exists='append', index=False, method='multi', chunksize=1000)
-        print(f"Data for {hole_id} {stage} stored successfully.")
-    except Exception as e:
-        log_error(f"Error storing processed data: {e}")
-
 def generate_interactive_graph(data):
     try:
         if data is None or data.empty:
-            return None, None, None, None, None, None, None
+            return None, None, None, None, None, None
 
         marsh_changes = identify_marsh_changes(data)
         notes_data = extract_notes(data)
@@ -374,63 +362,10 @@ def generate_interactive_graph(data):
         )])
         pie_fig.update_layout(title='Mix Volumes')
 
-        # Create Bubble Chart
-        bubble_fig = generate_bubble_chart(data)
-
-        return fig, temp_fig, scatter_3d_fig, pie_fig, bubble_fig, data, notes_data
+        return fig, temp_fig, scatter_3d_fig, pie_fig, data, notes_data
     except Exception as e:
         log_error(f"Error generating interactive graph: {e}")
-        return None, None, None, None, None, None, None
-
-def generate_bubble_chart(data):
-    try:
-        # Downsample the data to improve performance
-        total_duration = (data['TIMESTAMP'].max() - data['TIMESTAMP'].min()).total_seconds() / 3600  # in hours
-        target_frames = int(total_duration * 15)  # 15 frames per hour
-        downsample_factor = max(1, len(data) // target_frames)
-        
-        downsampled_data = data.iloc[::downsample_factor].copy()
-        downsampled_data['ElapsedHours'] = (downsampled_data['TIMESTAMP'] - downsampled_data['TIMESTAMP'].min()).dt.total_seconds() / 3600
-
-        fig = px.scatter(downsampled_data, x='ElapsedHours', y='flow', size='effPressure', color='mixNum',
-                         hover_name='mixNum', animation_frame='ElapsedHours',
-                         size_max=50, range_color=[2, 5],
-                         color_discrete_map={2: 'blue', 3: 'cyan', 4: 'magenta', 5: 'orange'},
-                         labels={'mixNum': 'Mix Type', 'effPressure': 'Effective Pressure', 'flow': 'Flow Rate'},
-                         title='Pressure Bubble Animation')
-        
-        fig.update_layout(
-            xaxis_title='Time Elapsed (Hours)',
-            yaxis_title='Flow Rate (L/min)',
-            showlegend=True,
-            updatemenus=[{
-                'buttons': [
-                    {
-                        'args': [None, {'frame': {'duration': 50, 'redraw': True}, 'fromcurrent': True}],
-                        'label': 'Play',
-                        'method': 'animate'
-                    },
-                    {
-                        'args': [[None], {'frame': {'duration': 0, 'redraw': True}, 'mode': 'immediate', 'transition': {'duration': 0}}],
-                        'label': 'Pause',
-                        'method': 'animate'
-                    }
-                ],
-                'direction': 'left',
-                'pad': {'r': 10, 't': 87},
-                'showactive': False,
-                'type': 'buttons',
-                'x': 0.1,
-                'xanchor': 'right',
-                'y': 0,
-                'yanchor': 'top'
-            }]
-        )
-        
-        return fig
-    except Exception as e:
-        log_error(f"Error generating bubble chart: {e}")
-        return None
+        return None, None, None, None, None, None
 
 def add_trace(fig, data, name, y_col, color, yaxis='y'):
     fig.add_trace(go.Scatter(
@@ -447,9 +382,27 @@ def add_trace(fig, data, name, y_col, color, yaxis='y'):
 
 def calculate_cumulative_zero_flow(data):
     try:
-        zero_flow_intervals = (data['flow'] == 0).astype(int).groupby(data['flow'].ne(0).cumsum()).sum()
-        zero_flow_intervals = zero_flow_intervals[zero_flow_intervals > 3]  # Only consider intervals longer than 3 minutes
-        cumulative_zero_flow = zero_flow_intervals.sum() / 60  # in hours
+        # Convert TIMESTAMP to datetime if it's not already
+        data['TIMESTAMP'] = pd.to_datetime(data['TIMESTAMP'])
+        
+        # Create a mask for zero flow
+        zero_flow_mask = data['flow'] == 0
+        
+        # Create groups of consecutive zero flow periods
+        zero_flow_groups = (zero_flow_mask != zero_flow_mask.shift()).cumsum()[zero_flow_mask]
+        
+        # Calculate the duration of each zero flow period
+        zero_flow_durations = data[zero_flow_mask].groupby(zero_flow_groups)['TIMESTAMP'].agg(['first', 'last'])
+        zero_flow_durations['duration'] = (zero_flow_durations['last'] - zero_flow_durations['first']).dt.total_seconds() / 3600
+        
+        # Sum durations of periods longer than 10 minutes (0.1667 hours)
+        cumulative_zero_flow = zero_flow_durations[zero_flow_durations['duration'] > 0.1667]['duration'].sum()
+        
+        # Ensure the result is not negative
+        cumulative_zero_flow = max(0, cumulative_zero_flow)
+        
+        print(f"Debug: Cumulative zero flow calculated as {cumulative_zero_flow:.2f} hours")
+        
         return cumulative_zero_flow
     except Exception as e:
         log_error(f"Error calculating cumulative zero flow: {e}")
@@ -471,6 +424,24 @@ def calculate_grout_and_mix_volumes(data):
 
 def update_injection_details(data, selected_stage, selected_hole_id):
     try:
+        # Data validation checks
+        print(f"Debug: Data shape: {data.shape}")
+        print(f"Debug: Columns: {data.columns.tolist()}")
+        print(f"Debug: Flow column dtype: {data['flow'].dtype}")
+        print(f"Debug: Flow column range: {data['flow'].min()} to {data['flow'].max()}")
+        print(f"Debug: Timestamp range: {data['TIMESTAMP'].min()} to {data['TIMESTAMP'].max()}")
+        
+        # Check for negative flows
+        negative_flows = data[data['flow'] < 0]
+        if not negative_flows.empty:
+            print(f"Warning: Negative flows detected: {len(negative_flows)} rows")
+
+        # Check for duplicate timestamps
+        duplicate_timestamps = data[data.duplicated('TIMESTAMP', keep=False)]
+        if not duplicate_timestamps.empty:
+            print(f"Warning: Duplicate timestamps detected: {len(duplicate_timestamps)} rows")
+
+        data['TIMESTAMP'] = pd.to_datetime(data['TIMESTAMP'])
         non_zero_flow = data[data['flow'] > 0]
         first_non_zero_flow_time = non_zero_flow['TIMESTAMP'].min()
         last_timestamp = data['TIMESTAMP'].max()
@@ -489,6 +460,10 @@ def update_injection_details(data, selected_stage, selected_hole_id):
         total_grouting_time = (last_timestamp - first_non_zero_flow_time).total_seconds() / 3600
         zero_flow_interval = calculate_cumulative_zero_flow(data)
         net_grouting_time = total_grouting_time - zero_flow_interval
+
+        print(f"Debug: Total grouting time: {total_grouting_time:.2f} hours")
+        print(f"Debug: Zero flow interval: {zero_flow_interval:.2f} hours")
+        print(f"Debug: Net grouting time: {net_grouting_time:.2f} hours")
 
         water_depth = data['waterDepth'].iloc[0]
         v_marsh_water = data['vmarshWater'].iloc[0]
@@ -536,16 +511,6 @@ def update_injection_details(data, selected_stage, selected_hole_id):
         log_error(f"Error updating injection details: {e}")
         return "Error updating injection details"
 
-def update_notes_table(notes_data):
-    try:
-        if notes_data is None or notes_data.empty:
-            return ""
-        comments = [f"{row['Timestamp']} - {row['Note']}" for _, row in notes_data.iterrows() if pd.notna(row['Note'])]
-        return "\n".join(comments)
-    except Exception as e:
-        log_error(f"Error updating notes table: {e}")
-        return ""
-
 def apply_tma(data, window_size=5):
     weights = np.arange(1, window_size + 1)
     weights = np.concatenate([weights, weights[:-1][::-1]])
@@ -563,10 +528,6 @@ try:
         encoded_logo = base64.b64encode(f.read()).decode('ascii')
 except FileNotFoundError:
     print("Logo file 'Lizard_Logo.jpg' not found. The app will run without the logo.")
-
-# Initialize Dash app
-app = Dash(__name__, suppress_callback_exceptions=True)
-server = app.server
 
 # Initialize Dash app
 app = Dash(__name__, suppress_callback_exceptions=True)
@@ -624,7 +585,6 @@ app.layout = html.Div([
     html.Button('Show/Hide 3D Scatter', id='toggle-3d-scatter-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
     html.Button('Show/Hide Pie Chart', id='toggle-pie-chart-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
     html.Button('Show/Hide Noise Reduction (MA)', id='toggle-ma-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
-    html.Button('Show/Hide Pressure Bubble Animation', id='toggle-bubble-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
     
     dcc.Loading(
         id="loading",
@@ -636,7 +596,6 @@ app.layout = html.Div([
             dcc.Graph(id='scatter-3d-plot', style={'display': 'none'}),
             dcc.Graph(id='pie-chart', style={'display': 'none'}),
             dcc.Graph(id='ma-graph', style={'display': 'none'}),
-            dcc.Graph(id='bubble-chart', style={'display': 'none'}),
         ]
     ),
     
@@ -730,7 +689,6 @@ def display_click_data(clickData):
      Output('scatter-3d-plot', 'figure'),
      Output('pie-chart', 'figure'),
      Output('ma-graph', 'figure'),
-     Output('bubble-chart', 'figure'),
      Output('injection-details', 'children'),
      Output('mix-summary', 'children'),
      Output('error-summary', 'children'),
@@ -753,7 +711,7 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
             if df is None:
                 raise ValueError("Error parsing file contents")
 
-            fig, temp_fig, scatter_3d_fig, pie_fig, bubble_fig, data, _ = generate_interactive_graph(df)
+            fig, temp_fig, scatter_3d_fig, pie_fig, data, notes_data = generate_interactive_graph(df)
             
             # Generate MA graph
             df_ma = apply_tma(df)
@@ -781,19 +739,17 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
             error_summary.extend([html.Span(error, style={'color': 'red'}) for error in mixes_and_marsh.get('Errors', [])] or ["NA"])
             error_summary = html.Div(error_summary)
 
-            # New code for handling notes
-            notes_data = extract_notes(df)
             giv_operator_notes = html.Div([
                 html.H3("GIV Operator Notes:"),
                 html.Pre(update_notes_table(notes_data))
-            ])
+            ]) if not notes_data.empty else ""
 
             return (f"File '{filename}' processed successfully", "",
-                    fig, temp_fig, scatter_3d_fig, pie_fig, ma_fig, bubble_fig, injection_details, mix_summary, error_summary, giv_operator_notes, "")
+                    fig, temp_fig, scatter_3d_fig, pie_fig, ma_fig, injection_details, mix_summary, error_summary, giv_operator_notes, "")
         except Exception as e:
             error_message = f"Error processing file: {str(e)}"
             log_error(error_message)
-            return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
+            return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
 
     elif trigger_id == 'load-data-button' and hole_id and stage:
         try:
@@ -802,12 +758,12 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
             if data is None or data.empty:
                 error_message = f"No data found for Hole ID: {hole_id} and Stage: {stage}"
                 log_error(error_message)
-                return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
+                return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
             
             print(f"Data retrieved successfully. Shape: {data.shape}")
             mixes_and_marsh = track_mixes_and_marsh_values(data)
             
-            fig, temp_fig, scatter_3d_fig, pie_fig, bubble_fig, _, _ = generate_interactive_graph(data)
+            fig, temp_fig, scatter_3d_fig, pie_fig, _, notes_data = generate_interactive_graph(data)
             
             # Generate MA graph
             data_ma = apply_tma(data)
@@ -835,18 +791,16 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
             error_summary.extend([html.Span(error, style={'color': 'red'}) for error in mixes_and_marsh.get('Errors', [])] or ["NA"])
             error_summary = html.Div(error_summary)
 
-            # New code for handling notes
-            notes_data = extract_notes(data)
             giv_operator_notes = html.Div([
                 html.H3("GIV Operator Notes:"),
                 html.Pre(update_notes_table(notes_data))
-            ])
+            ]) if not notes_data.empty else ""
 
-            return f"Data for {hole_id} {stage} loaded successfully", "", fig, temp_fig, scatter_3d_fig, pie_fig, ma_fig, bubble_fig, injection_details, mix_summary, error_summary, giv_operator_notes, ""
+            return f"Data for {hole_id} {stage} loaded successfully", "", fig, temp_fig, scatter_3d_fig, pie_fig, ma_fig, injection_details, mix_summary, error_summary, giv_operator_notes, ""
         except Exception as e:
             error_message = f"Error loading data: {str(e)}"
             log_error(error_message)
-            return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
+            return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
 
     raise PreventUpdate
 
@@ -887,15 +841,6 @@ def toggle_ma_graph(n_clicks):
         return {'display': 'none'}
     return {'display': 'block' if n_clicks % 2 == 1 else 'none'}
 
-@app.callback(
-    Output('bubble-chart', 'style'),
-    [Input('toggle-bubble-button', 'n_clicks')]
-)
-def toggle_bubble_chart(n_clicks):
-    if n_clicks is None:
-        return {'display': 'none'}
-    return {'display': 'block' if n_clicks % 2 == 1 else 'none'}
-
 # Callback for bug report/feedback button
 @app.callback(
     Output("bug-report-button", "n_clicks"),
@@ -917,7 +862,6 @@ def open_email_client(n_clicks):
      State('scatter-3d-plot', 'figure'),
      State('pie-chart', 'figure'),
      State('ma-graph', 'figure'),
-     State('bubble-chart', 'figure'),
      State('injection-details', 'children'),
      State('mix-summary', 'children'),
      State('error-summary', 'children'),
@@ -925,7 +869,7 @@ def open_email_client(n_clicks):
      State('recipe-table', 'data'),
      State('qc-by-input', 'value')]
 )
-def print_report(n_clicks, figure, temp_figure, scatter_3d_figure, pie_figure, ma_figure, bubble_figure, injection_details, mix_summary, error_summary, giv_operator_notes, recipe_table_data, qc_by):
+def print_report(n_clicks, figure, temp_figure, scatter_3d_figure, pie_figure, ma_figure, injection_details, mix_summary, error_summary, giv_operator_notes, recipe_table_data, qc_by):
     if n_clicks > 0:
         try:
             # Convert the figures to HTML divs
@@ -934,7 +878,6 @@ def print_report(n_clicks, figure, temp_figure, scatter_3d_figure, pie_figure, m
             scatter_3d_plot_div = pio.to_html(scatter_3d_figure, full_html=False)
             pie_chart_div = pio.to_html(pie_figure, full_html=False)
             ma_plot_div = pio.to_html(ma_figure, full_html=False)
-            bubble_chart_div = pio.to_html(bubble_figure, full_html=False)
 
             # Convert recipe table to HTML
             recipe_table_html = """
@@ -1003,10 +946,6 @@ def print_report(n_clicks, figure, temp_figure, scatter_3d_figure, pie_figure, m
                     <div class="section">
                         <h2>Noise Reduction (Moving Average) Graph</h2>
                         {ma_plot_div}
-                    </div>
-                    <div class="section">
-                        <h2>Pressure Bubble Animation</h2>
-                        {bubble_chart_div}
                     </div>
                     <div class="section">
                         <h2>Recipe Table</h2>
