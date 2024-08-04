@@ -1059,4 +1059,3 @@ def print_report(n_clicks, figure, temp_figure, scatter_3d_figure, pie_figure, m
 
 if __name__ == '__main__':
     app.run_server(debug=False)
-encoded_
