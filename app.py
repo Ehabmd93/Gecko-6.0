@@ -172,9 +172,17 @@ def retrieve_processed_data(hole_id, stage):
         
         if df.empty:
             print(f"No data found for hole_id: {hole_id} and stage: {stage}")
-            return pd.DataFrame()  # Return an empty DataFrame instead of None
         else:
             print(f"Retrieved {len(df)} rows for hole_id: {hole_id} and stage: {stage}")
+        
+        # Clean the Notes column
+        if 'Notes' in df.columns:
+            df['Notes'] = df['Notes'].replace({'NaN': None, 'nan': None}).fillna('')
+        
+        return df
+    except Exception as e:
+        log_error(f"Error retrieving processed data: {e}")
+        return pd.DataFrame()  # Return an empty DataFrame instead of None
         
         # Clean the Notes column
         if 'Notes' in df.columns:
@@ -841,9 +849,9 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
             print(f"Attempting to load data for hole_id: {hole_id}, stage: {stage}")
             data = retrieve_processed_data(hole_id, stage)
             if data.empty:
-                error_message = f"No data found for Hole ID: {hole_id} and Stage: {stage}"
-                log_error(error_message)
-                return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
+             error_message = f"No data found for Hole ID: {hole_id} and Stage: {stage}"
+             log_error(error_message)
+             return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
             
             print(f"Data retrieved successfully. Shape: {data.shape}")
             mixes_and_marsh = track_mixes_and_marsh_values(data)
