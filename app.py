@@ -537,12 +537,13 @@ def apply_tma(data, window_size=5):
 
 def calculate_stage_volumes():
     try:
-        query = text("SELECT stage, SUM(volume) as total_volume FROM processed_data GROUP BY stage ORDER BY total_volume")
+        query = text("SELECT stage, hole_id, MAX(volume) as total_volume FROM processed_data GROUP BY stage, hole_id ORDER BY total_volume")
         df = pd.read_sql_query(query, engine)
+        df['stage_hole_id'] = df['stage'] + ', ' + df['hole_id']
         return df
     except Exception as e:
         log_error(f"Error calculating stage volumes: {e}")
-        return pd.DataFrame(columns=['stage', 'total_volume'])
+        return pd.DataFrame(columns=['stage', 'hole_id', 'total_volume'])
 
 # Load and encode the Gecko logo
 encoded_logo = None
@@ -609,7 +610,7 @@ app.layout = html.Div([
     html.Button('Show/Hide Pie Chart', id='toggle-pie-chart-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
     html.Button('Show/Hide Noise Reduction (MA)', id='toggle-ma-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
     html.Button('Show/Hide Lugeon', id='toggle-lugeon-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
-    html.Button('Show Stage Volumes', id='show-stage-volumes-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20}),
+    html.Button('Bar Chart (Stage Intake)', id='show-stage-volumes-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20}),
     
     dcc.Loading(
         id="loading",
@@ -622,7 +623,7 @@ app.layout = html.Div([
             dcc.Graph(id='pie-chart', style={'display': 'none'}),
             dcc.Graph(id='ma-graph', style={'display': 'none'}),
             dcc.Graph(id='lugeon-graph', style={'display': 'none'}),
-            dcc.Graph(id='stage-volumes-graph', style={'marginTop': 20}),
+            dcc.Graph(id='stage-volumes-graph', style={'marginTop': 20, 'display': 'none'}),
         ]
     ),
     
@@ -834,6 +835,7 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
 
 # New Callback to show stage volumes
 @app.callback(
+    Output('stage-volumes-graph', 'style'),
     Output('stage-volumes-graph', 'figure'),
     Input('show-stage-volumes-button', 'n_clicks'),
     State('hole-id-dropdown', 'value'),
@@ -845,30 +847,30 @@ def show_stage_volumes(n_clicks, hole_id, selected_stage):
     
     df = calculate_stage_volumes()
     if df.empty:
-        return {}
+        return {'display': 'none'}, {}
 
-    selected_stage_volume = df.loc[df['stage'] == selected_stage, 'total_volume'].values[0]
+    selected_stage_volume = df.loc[(df['stage'] == selected_stage) & (df['hole_id'] == hole_id), 'total_volume'].values[0]
     left_stages = df[df['total_volume'] < selected_stage_volume]
     right_stages = df[df['total_volume'] > selected_stage_volume]
 
     fig = go.Figure()
 
     fig.add_trace(go.Bar(
-        x=left_stages['stage'],
+        x=left_stages['stage_hole_id'],
         y=left_stages['total_volume'],
         name='Less Grout Intake',
         marker_color='rgba(222,45,38,0.8)'
     ))
 
     fig.add_trace(go.Bar(
-        x=[selected_stage],
+        x=[f"{selected_stage}, {hole_id}"],
         y=[selected_stage_volume],
         name='Selected Stage',
         marker_color='rgba(55,128,191,0.8)'
     ))
 
     fig.add_trace(go.Bar(
-        x=right_stages['stage'],
+        x=right_stages['stage_hole_id'],
         y=right_stages['total_volume'],
         name='More Grout Intake',
         marker_color='rgba(50,171,96,0.8)'
@@ -876,12 +878,12 @@ def show_stage_volumes(n_clicks, hole_id, selected_stage):
 
     fig.update_layout(
         title='Stage Total Grout Volume Intake',
-        xaxis_title='Stage',
-        yaxis_title='Total Volume',
+        xaxis_title='Stage and Hole ID',
+        yaxis_title='Total Volume (L)',
         barmode='stack'
     )
 
-    return fig
+    return {'display': 'block' if n_clicks % 2 == 1 else 'none'}, fig
 
 # Callbacks to show/hide additional plots
 @app.callback(
@@ -1071,7 +1073,7 @@ def print_report(n_clicks, figure, temp_figure, scatter_3d_figure, pie_figure, m
 
             # Write the HTML content to a file
             output_path = 'Grout_Gecko_V1.0_QHBW_Grouting_Data_QC_Report.html'
-            with open(output_path, 'w', encoding='utf-8') as f:
+            with open(output_path, 'w', encoding='utf-8') as f):
                 f.write(html_content)
 
             # Open the HTML file in the default web browser
