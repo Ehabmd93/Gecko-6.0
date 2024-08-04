@@ -263,7 +263,7 @@ def update_notes_table(notes_data):
 def generate_interactive_graph(data):
     try:
         if data is None or data.empty:
-            return None, None, None, None, None, None
+            return None, None, None, None, None, None, None
 
         marsh_changes = identify_marsh_changes(data)
         notes_data = extract_notes(data)
@@ -362,10 +362,58 @@ def generate_interactive_graph(data):
         )])
         pie_fig.update_layout(title='Mix Volumes')
 
-        return fig, temp_fig, scatter_3d_fig, pie_fig, data, notes_data
+        # Create Lugeon vs Effective Pressure plot
+        lugeon_fig = go.Figure()
+        add_trace(lugeon_fig, data, 'Lugeon', 'Lugeon', 'black')
+        add_trace(lugeon_fig, data, 'Effective Pressure', 'effPressure', 'green', yaxis='y2')
+
+        # Detect refusal trend
+        data['rolling_lugeon'] = data['Lugeon'].rolling(window=12, min_periods=1).mean()  # 2 minutes (assuming 10-second intervals)
+        refusal_periods = data[data['rolling_lugeon'] <= 3.3]
+
+        if not refusal_periods.empty:
+            refusal_start = refusal_periods.index[0]
+            refusal_end = refusal_periods.index[-1]
+            lugeon_fig.add_shape(
+                type="rect",
+                x0=data.loc[refusal_start, 'ElapsedMinutes'],
+                x1=data.loc[refusal_end, 'ElapsedMinutes'],
+                y0=0,
+                y1=data['Lugeon'].max(),
+                fillcolor="red",
+                opacity=0.2,
+                layer="below",
+                line_width=0,
+            )
+            lugeon_fig.add_annotation(
+                x=(data.loc[refusal_start, 'ElapsedMinutes'] + data.loc[refusal_end, 'ElapsedMinutes']) / 2,
+                y=data['Lugeon'].max(),
+                text="Refusal trend detected",
+                showarrow=True,
+                arrowhead=2,
+                arrowsize=1,
+                arrowwidth=2,
+                arrowcolor="red",
+                font=dict(size=12, color="red"),
+                align="center",
+            )
+
+        lugeon_fig.update_layout(
+            title='Lugeon and Effective Pressure vs Time',
+            xaxis_title='Time Elapsed (Minutes)',
+            yaxis=dict(title='Lugeon', side='left'),
+            yaxis2=dict(title='Effective Pressure (bar)', overlaying='y', side='right'),
+            hovermode='x unified'
+        )
+        lugeon_fig.update_xaxes(
+            tickvals=[(t - start_time).total_seconds() / 60 for t in time_ticks],
+            ticktext=[t.strftime('%H:%M') for t in time_ticks]
+        )
+
+        return fig, temp_fig, scatter_3d_fig, pie_fig, data, notes_data, lugeon_fig
     except Exception as e:
         log_error(f"Error generating interactive graph: {e}")
-        return None, None, None, None, None, None
+        return None, None, None, None, None, None, None
 
 def add_trace(fig, data, name, y_col, color, yaxis='y'):
     fig.add_trace(go.Scatter(
@@ -585,6 +633,7 @@ app.layout = html.Div([
     html.Button('Show/Hide 3D Scatter', id='toggle-3d-scatter-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
     html.Button('Show/Hide Pie Chart', id='toggle-pie-chart-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
     html.Button('Show/Hide Noise Reduction (MA)', id='toggle-ma-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
+    html.Button('Show/Hide Lugeon', id='toggle-lugeon-button', n_clicks=0, style={'marginTop': 20, 'marginBottom': 20, 'marginLeft': 10}),
     
     dcc.Loading(
         id="loading",
@@ -596,6 +645,7 @@ app.layout = html.Div([
             dcc.Graph(id='scatter-3d-plot', style={'display': 'none'}),
             dcc.Graph(id='pie-chart', style={'display': 'none'}),
             dcc.Graph(id='ma-graph', style={'display': 'none'}),
+            dcc.Graph(id='lugeon-graph', style={'display': 'none'}),
         ]
     ),
     
@@ -689,6 +739,7 @@ def display_click_data(clickData):
      Output('scatter-3d-plot', 'figure'),
      Output('pie-chart', 'figure'),
      Output('ma-graph', 'figure'),
+     Output('lugeon-graph', 'figure'),
      Output('injection-details', 'children'),
      Output('mix-summary', 'children'),
      Output('error-summary', 'children'),
@@ -711,7 +762,7 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
             if df is None:
                 raise ValueError("Error parsing file contents")
 
-            fig, temp_fig, scatter_3d_fig, pie_fig, data, notes_data = generate_interactive_graph(df)
+            fig, temp_fig, scatter_3d_fig, pie_fig, data, notes_data, lugeon_fig = generate_interactive_graph(df)
             
             # Generate MA graph
             df_ma = apply_tma(df)
@@ -745,11 +796,11 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
             ]) if not notes_data.empty else ""
 
             return (f"File '{filename}' processed successfully", "",
-                    fig, temp_fig, scatter_3d_fig, pie_fig, ma_fig, injection_details, mix_summary, error_summary, giv_operator_notes, "")
+                    fig, temp_fig, scatter_3d_fig, pie_fig, ma_fig, lugeon_fig, injection_details, mix_summary, error_summary, giv_operator_notes, "")
         except Exception as e:
             error_message = f"Error processing file: {str(e)}"
             log_error(error_message)
-            return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
+            return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
 
     elif trigger_id == 'load-data-button' and hole_id and stage:
         try:
@@ -758,12 +809,12 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
             if data is None or data.empty:
                 error_message = f"No data found for Hole ID: {hole_id} and Stage: {stage}"
                 log_error(error_message)
-                return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
+                return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
             
             print(f"Data retrieved successfully. Shape: {data.shape}")
             mixes_and_marsh = track_mixes_and_marsh_values(data)
             
-            fig, temp_fig, scatter_3d_fig, pie_fig, _, notes_data = generate_interactive_graph(data)
+            fig, temp_fig, scatter_3d_fig, pie_fig, _, notes_data, lugeon_fig = generate_interactive_graph(data)
             
             # Generate MA graph
             data_ma = apply_tma(data)
@@ -796,11 +847,11 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
                 html.Pre(update_notes_table(notes_data))
             ]) if not notes_data.empty else ""
 
-            return f"Data for {hole_id} {stage} loaded successfully", "", fig, temp_fig, scatter_3d_fig, pie_fig, ma_fig, injection_details, mix_summary, error_summary, giv_operator_notes, ""
+            return f"Data for {hole_id} {stage} loaded successfully", "", fig, temp_fig, scatter_3d_fig, pie_fig, ma_fig, lugeon_fig, injection_details, mix_summary, error_summary, giv_operator_notes, ""
         except Exception as e:
             error_message = f"Error loading data: {str(e)}"
             log_error(error_message)
-            return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
+            return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
 
     raise PreventUpdate
 
@@ -841,6 +892,15 @@ def toggle_ma_graph(n_clicks):
         return {'display': 'none'}
     return {'display': 'block' if n_clicks % 2 == 1 else 'none'}
 
+@app.callback(
+    Output('lugeon-graph', 'style'),
+    [Input('toggle-lugeon-button', 'n_clicks')]
+)
+def toggle_lugeon_graph(n_clicks):
+    if n_clicks is None:
+        return {'display': 'none'}
+    return {'display': 'block' if n_clicks % 2 == 1 else 'none'}
+
 # Callback for bug report/feedback button
 @app.callback(
     Output("bug-report-button", "n_clicks"),
@@ -862,6 +922,7 @@ def open_email_client(n_clicks):
      State('scatter-3d-plot', 'figure'),
      State('pie-chart', 'figure'),
      State('ma-graph', 'figure'),
+     State('lugeon-graph', 'figure'),
      State('injection-details', 'children'),
      State('mix-summary', 'children'),
      State('error-summary', 'children'),
@@ -869,7 +930,7 @@ def open_email_client(n_clicks):
      State('recipe-table', 'data'),
      State('qc-by-input', 'value')]
 )
-def print_report(n_clicks, figure, temp_figure, scatter_3d_figure, pie_figure, ma_figure, injection_details, mix_summary, error_summary, giv_operator_notes, recipe_table_data, qc_by):
+def print_report(n_clicks, figure, temp_figure, scatter_3d_figure, pie_figure, ma_figure, lugeon_figure, injection_details, mix_summary, error_summary, giv_operator_notes, recipe_table_data, qc_by):
     if n_clicks > 0:
         try:
             # Convert the figures to HTML divs
@@ -878,6 +939,7 @@ def print_report(n_clicks, figure, temp_figure, scatter_3d_figure, pie_figure, m
             scatter_3d_plot_div = pio.to_html(scatter_3d_figure, full_html=False)
             pie_chart_div = pio.to_html(pie_figure, full_html=False)
             ma_plot_div = pio.to_html(ma_figure, full_html=False)
+            lugeon_plot_div = pio.to_html(lugeon_figure, full_html=False)
 
             # Convert recipe table to HTML
             recipe_table_html = """
@@ -946,6 +1008,10 @@ def print_report(n_clicks, figure, temp_figure, scatter_3d_figure, pie_figure, m
                     <div class="section">
                         <h2>Noise Reduction (Moving Average) Graph</h2>
                         {ma_plot_div}
+                    </div>
+                    <div class="section">
+                        <h2>Lugeon and Effective Pressure Graph</h2>
+                        {lugeon_plot_div}
                     </div>
                     <div class="section">
                         <h2>Recipe Table</h2>
