@@ -790,38 +790,32 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
     ctx = dash.callback_context
     trigger_id = ctx.triggered[0]['prop_id'].split('.')[0]
 
-    if trigger_id == 'load-data-button' and hole_id and stage:
+    if trigger_id == 'upload-data' and contents:
         try:
-            print(f"Attempting to load data for hole_id: {hole_id}, stage: {stage}")
-            data = retrieve_processed_data(hole_id, stage)
-            if data.empty:
-                error_message = f"No data found for Hole ID: {hole_id} and Stage: {stage}"
-                log_error(error_message)
-                return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
-            
-            print(f"Data retrieved successfully. Shape: {data.shape}")
-            mixes_and_marsh = track_mixes_and_marsh_values(data)
-            
-            fig, temp_fig, scatter_3d_fig, pie_fig, _, notes_data, lugeon_fig = generate_interactive_graph(data)
+            df, mixes_and_marsh = parse_contents(contents, filename)
+            if df is None:
+                raise ValueError("Error parsing file contents")
+
+            fig, temp_fig, scatter_3d_fig, pie_fig, data, notes_data, lugeon_fig = generate_interactive_graph(df)
             
             # Generate MA graph
-            data_ma = apply_tma(data)
+            df_ma = apply_tma(df)
             ma_fig = go.Figure()
-            add_trace(ma_fig, data_ma, 'Flow Rate (MA)', 'flow_tma', 'blue')
-            add_trace(ma_fig, data_ma, 'Effective Pressure (MA)', 'effPressure_tma', 'green', yaxis='y2')
+            add_trace(ma_fig, df_ma, 'Flow Rate (MA)', 'flow_tma', 'blue')
+            add_trace(ma_fig, df_ma, 'Effective Pressure (MA)', 'effPressure_tma', 'green', yaxis='y2')
             ma_fig.update_layout(
                 title='Noise Reduction (Moving Average)',
                 yaxis=dict(title='Flow Rate (L/min)', side='left'),
                 yaxis2=dict(title='Effective Pressure (bar)', overlaying='y', side='right'),
                 hovermode='x unified'
             )
-            
-            injection_details = update_injection_details(data, stage, hole_id)
+
+            injection_details = update_injection_details(df, stage, hole_id)
             mix_summary = html.Div([
                 html.P(f"Mix {mix}: {count} times") for mix, count in mixes_and_marsh.items() if mix not in ['Cumulative Zero Flow']
             ])
             
-            stage_length = data['stageBottom'].iloc[0] - data['stageTop'].iloc[0]
+            stage_length = df['stageBottom'].iloc[0] - df['stageTop'].iloc[0]
             error_summary = []
             if stage_length < 6:
                 error_summary.append("Short stage length detected")
@@ -835,12 +829,21 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
                 html.Pre(update_notes_table(notes_data))
             ]) if not notes_data.empty else ""
 
-            return f"Data for {hole_id} {stage} loaded successfully", "", fig, temp_fig, scatter_3d_fig, pie_fig, ma_fig, lugeon_fig, injection_details, mix_summary, error_summary, giv_operator_notes, ""
+            return (f"File '{filename}' processed successfully", "",
+                    fig, temp_fig, scatter_3d_fig, pie_fig, ma_fig, lugeon_fig, injection_details, mix_summary, error_summary, giv_operator_notes, "")
         except Exception as e:
-            error_message = f"Error loading data: {str(e)}"
+            error_message = f"Error processing file: {str(e)}"
             log_error(error_message)
             return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
 
+    elif trigger_id == 'load-data-button' and hole_id and stage:
+        try:
+            print(f"Attempting to load data for hole_id: {hole_id}, stage: {stage}")
+            data = retrieve_processed_data(hole_id, stage)
+            if data.empty:
+                error_message = f"No data found for Hole ID: {hole_id} and Stage: {stage}"
+                log_error(error_message)
+                return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
             
             print(f"Data retrieved successfully. Shape: {data.shape}")
             mixes_and_marsh = track_mixes_and_marsh_values(data)
