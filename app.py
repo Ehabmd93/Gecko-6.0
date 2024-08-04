@@ -1073,7 +1073,7 @@ def print_report(n_clicks, figure, temp_figure, scatter_3d_figure, pie_figure, m
 
             # Write the HTML content to a file
             output_path = 'Grout_Gecko_V1.0_QHBW_Grouting_Data_QC_Report.html'
-            with open(output_path, 'w', encoding='utf-8') as f):
+            with open(output_path, 'w', encoding='utf-8') as f:
                 f.write(html_content)
 
             # Open the HTML file in the default web browser
