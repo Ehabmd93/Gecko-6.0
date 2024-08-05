@@ -142,8 +142,8 @@ def store_processed_data(df, hole_id, stage):
 def retrieve_processed_data(hole_id, stage):
     try:
         query = text("""
-            SELECT "TIMESTAMP", flow, effPressure, volume, gaugePressure, Lugeon, 
-                   mixNum, vmarshGrout, Notes
+            SELECT "TIMESTAMP", flow, "effPressure", volume, "gaugePressure", "Lugeon", 
+                   "mixNum", "vmarshGrout", "Notes"
             FROM processed_data 
             WHERE hole_id = :hole_id AND stage = :stage
             ORDER BY "TIMESTAMP"
