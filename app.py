@@ -798,7 +798,8 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
                 html.H3("GIV Operator Notes:"),
                 html.Pre(update_notes_table(notes_data))
             ]) if not notes_data.empty else ""
-return f"Data for {hole_id} {stage} loaded successfully", "", fig, temp_fig, scatter_3d_fig, pie_fig, ma_fig, lugeon_fig, injection_details, mix_summary, error_summary, giv_operator_notes, ""
+
+            return f"Data for {hole_id} {stage} loaded successfully", "", fig, temp_fig, scatter_3d_fig, pie_fig, ma_fig, lugeon_fig, injection_details, mix_summary, error_summary, giv_operator_notes, ""
         except Exception as e:
             error_message = f"Error loading data: {str(e)}"
             log_error(error_message)
