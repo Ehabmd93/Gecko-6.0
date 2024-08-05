@@ -43,28 +43,13 @@ processed_data = Table(
     Column('hole_id', String, index=True),
     Column('stage', String, index=True),
     Column('TIMESTAMP', TIMESTAMP, index=True),
-    Column('RECORD', Float),
-    Column('CumTimeMin', Float),
     Column('flow', Float),
-    Column('AvgFlow', Float),
+    Column('effPressure', Float),
     Column('volume', Float),
     Column('gaugePressure', Float),
-    Column('AvgGaugePressure', Float),
-    Column('effPressure', Float),
-    Column('AvgEffectivePressure', Float),
     Column('Lugeon', Float),
-    Column('Batt_V', Float),
-    Column('PTemp', Float),
-    Column('holeNum', Float),
     Column('mixNum', Float),
-    Column('waterTable', Float),
-    Column('stageTop', Float),
-    Column('stageBottom', Float),
-    Column('gaugeHeight', Float),
-    Column('waterDepth', Float),
-    Column('holeAngle', Float),
     Column('vmarshGrout', Float),
-    Column('vmarshWater', Float),
     Column('Notes', String)
 )
 
@@ -105,10 +90,8 @@ def extract_file_details(file_name):
 def clean_data(data):
     try:
         headers = [
-            'TIMESTAMP', 'RECORD', 'CumTimeMin', 'flow', 'AvgFlow', 'volume', 'gaugePressure',
-            'AvgGaugePressure', 'effPressure', 'AvgEffectivePressure', 'Lugeon', 'Batt_V', 'PTemp', 
-            'holeNum', 'mixNum', 'waterTable', 'stageTop', 'stageBottom', 'gaugeHeight', 
-            'waterDepth', 'holeAngle', 'vmarshGrout', 'vmarshWater', 'Notes'
+            'TIMESTAMP', 'flow', 'effPressure', 'volume', 'gaugePressure',
+            'Lugeon', 'mixNum', 'vmarshGrout', 'Notes'
         ]
         
         data = data.drop([0, 1, 2]).reset_index(drop=True)
@@ -118,10 +101,8 @@ def clean_data(data):
         data['TIMESTAMP'] = pd.to_datetime(data['TIMESTAMP'], errors='coerce')
         data = data.dropna(subset=['TIMESTAMP'])
 
-        numeric_columns = ['flow', 'AvgFlow', 'volume', 'gaugePressure', 'AvgGaugePressure', 
-                           'effPressure', 'AvgEffectivePressure', 'Lugeon', 'Batt_V', 'PTemp', 
-                           'holeNum', 'mixNum', 'waterTable', 'stageTop', 'stageBottom', 
-                           'gaugeHeight', 'waterDepth', 'holeAngle', 'vmarshGrout', 'vmarshWater']
+        numeric_columns = ['flow', 'effPressure', 'volume', 'gaugePressure', 
+                           'Lugeon', 'mixNum', 'vmarshGrout']
         data[numeric_columns] = data[numeric_columns].apply(pd.to_numeric, errors='coerce')
 
         return data
@@ -157,28 +138,50 @@ def store_processed_data(df, hole_id, stage):
     except Exception as e:
         log_error(f"Error storing processed data: {e}")
 
+@lru_cache(maxsize=32)
 def retrieve_processed_data(hole_id, stage):
     try:
         query = text("""
-            SELECT * FROM processed_data 
+            SELECT "TIMESTAMP", flow, effPressure, volume, gaugePressure, Lugeon, 
+                   mixNum, vmarshGrout, Notes
+            FROM processed_data 
             WHERE hole_id = :hole_id AND stage = :stage
             ORDER BY "TIMESTAMP"
         """)
-        df = pd.read_sql_query(query, engine, params={"hole_id": hole_id, "stage": stage})
+        
+        with engine.connect() as connection:
+            result = connection.execute(query, {"hole_id": hole_id, "stage": stage})
+            df = pd.DataFrame(result.fetchall(), columns=result.keys())
         
         if df.empty:
             print(f"No data found for hole_id: {hole_id} and stage: {stage}")
         else:
             print(f"Retrieved {len(df)} rows for hole_id: {hole_id} and stage: {stage}")
         
-        # Clean the Notes column
-        if 'Notes' in df.columns:
-            df['Notes'] = df['Notes'].replace({'NaN': None, 'nan': None}).fillna('')
+        df['Notes'] = df['Notes'].replace({'NaN': None, 'nan': None}).fillna('')
         
         return df
     except Exception as e:
         log_error(f"Error retrieving processed data: {e}")
         return None
+
+def fetch_additional_data(hole_id, stage):
+    try:
+        query = text("""
+            SELECT DISTINCT waterTable, stageTop, stageBottom, waterDepth, vmarshWater
+            FROM processed_data 
+            WHERE hole_id = :hole_id AND stage = :stage
+            LIMIT 1
+        """)
+        
+        with engine.connect() as connection:
+            result = connection.execute(query, {"hole_id": hole_id, "stage": stage})
+            additional_data = dict(result.fetchone())
+        
+        return additional_data
+    except Exception as e:
+        log_error(f"Error fetching additional data: {e}")
+        return {}
 
 def track_mixes_and_marsh_values(data):
     mix_counts = {'A': 0, 'B': 0, 'C': 0, 'D': 0}
@@ -265,7 +268,7 @@ def generate_interactive_graph(data):
         marsh_changes = identify_marsh_changes(data)
         notes_data = extract_notes(data)
 
-        hole_id = data['holeNum'].iloc[0] if 'holeNum' in data.columns else 'Unknown'
+        hole_id = data['mixNum'].iloc[0] if 'mixNum' in data.columns else 'Unknown'
         start_time = data['TIMESTAMP'].min()
         data['ElapsedMinutes'] = (data['TIMESTAMP'] - start_time).dt.total_seconds() / 60
 
@@ -309,17 +312,12 @@ def generate_interactive_graph(data):
             hovermode='x unified'
         )
 
-        # Create temperature plot
+        # Create temperature plot (placeholder, as PTemp is not in the main dataset anymore)
         temp_fig = go.Figure()
-        add_trace(temp_fig, data, 'Temperature', 'PTemp', 'red')
         temp_fig.update_layout(
-            title='Temperature vs Time',
+            title='Temperature vs Time (Data not available in optimized version)',
             xaxis_title='Time Elapsed (Minutes)',
             yaxis_title='Temperature (°C)'
-        )
-        temp_fig.update_xaxes(
-            tickvals=[(t - start_time).total_seconds() / 60 for t in time_ticks],
-            ticktext=[t.strftime('%H:%M') for t in time_ticks]
         )
 
         # Create 3D Scatter Plot
@@ -396,27 +394,14 @@ def add_trace(fig, data, name, y_col, color, yaxis='y'):
 
 def calculate_cumulative_zero_flow(data):
     try:
-        # Convert TIMESTAMP to datetime if it's not already
         data['TIMESTAMP'] = pd.to_datetime(data['TIMESTAMP'])
-        
-        # Create a mask for zero flow
         zero_flow_mask = data['flow'] == 0
-        
-        # Create groups of consecutive zero flow periods
         zero_flow_groups = (zero_flow_mask != zero_flow_mask.shift()).cumsum()[zero_flow_mask]
-        
-        # Calculate the duration of each zero flow period
         zero_flow_durations = data[zero_flow_mask].groupby(zero_flow_groups)['TIMESTAMP'].agg(['first', 'last'])
         zero_flow_durations['duration'] = (zero_flow_durations['last'] - zero_flow_durations['first']).dt.total_seconds() / 3600
-        
-        # Sum durations of periods longer than 10 minutes (0.1667 hours)
         cumulative_zero_flow = zero_flow_durations[zero_flow_durations['duration'] > 0.1667]['duration'].sum()
-        
-        # Ensure the result is not negative
         cumulative_zero_flow = max(0, cumulative_zero_flow)
-        
         print(f"Debug: Cumulative zero flow calculated as {cumulative_zero_flow:.2f} hours")
-        
         return cumulative_zero_flow
     except Exception as e:
         log_error(f"Error calculating cumulative zero flow: {e}")
@@ -436,21 +421,18 @@ def calculate_grout_and_mix_volumes(data):
         log_error(f"Error calculating grout and mix volumes: {e}")
         return 0, 0, 0, 0, 0
 
-def update_injection_details(data, selected_stage, selected_hole_id):
+def update_injection_details(data, selected_stage, selected_hole_id, additional_data):
     try:
-        # Data validation checks
         print(f"Debug: Data shape: {data.shape}")
         print(f"Debug: Columns: {data.columns.tolist()}")
         print(f"Debug: Flow column dtype: {data['flow'].dtype}")
         print(f"Debug: Flow column range: {data['flow'].min()} to {data['flow'].max()}")
         print(f"Debug: Timestamp range: {data['TIMESTAMP'].min()} to {data['TIMESTAMP'].max()}")
         
-        # Check for negative flows
         negative_flows = data[data['flow'] < 0]
         if not negative_flows.empty:
             print(f"Warning: Negative flows detected: {len(negative_flows)} rows")
 
-        # Check for duplicate timestamps
         duplicate_timestamps = data[data.duplicated('TIMESTAMP', keep=False)]
         if not duplicate_timestamps.empty:
             print(f"Warning: Duplicate timestamps detected: {len(duplicate_timestamps)} rows")
@@ -460,9 +442,9 @@ def update_injection_details(data, selected_stage, selected_hole_id):
         first_non_zero_flow_time = non_zero_flow['TIMESTAMP'].min()
         last_timestamp = data['TIMESTAMP'].max()
 
-        stage_top = data.loc[data['TIMESTAMP'].idxmin(), 'stageTop']
-        stage_bottom = data.loc[data['TIMESTAMP'].idxmin(), 'stageBottom']
-        stage_length = stage_bottom - stage_top
+        stage_top = additional_data.get('stageTop', 'N/A')
+        stage_bottom = additional_data.get('stageBottom', 'N/A')
+        stage_length = stage_bottom - stage_top if isinstance(stage_top, (int, float)) and isinstance(stage_bottom, (int, float)) else 'N/A'
 
         first_date = first_non_zero_flow_time.strftime('%Y-%m-%d')
         first_time = first_non_zero_flow_time.strftime('%H:%M:%S')
@@ -479,8 +461,8 @@ def update_injection_details(data, selected_stage, selected_hole_id):
         print(f"Debug: Zero flow interval: {zero_flow_interval:.2f} hours")
         print(f"Debug: Net grouting time: {net_grouting_time:.2f} hours")
 
-        water_depth = data['waterDepth'].iloc[0]
-        v_marsh_water = data['vmarshWater'].iloc[0]
+        water_depth = additional_data.get('waterDepth', 'N/A')
+        v_marsh_water = additional_data.get('vmarshWater', 'N/A')
 
         details = [
             html.H2("Grout Injection Summary"),
@@ -496,7 +478,7 @@ def update_injection_details(data, selected_stage, selected_hole_id):
             html.Br(),
             html.B("Stage Bottom: "), html.Span(f"{stage_bottom} meters", style={'color': 'red', 'font-weight': 'bold'}),
             html.Br(),
-            html.B("Stage Length: "), html.Span(f"{stage_length:.2f} meters", style={'color': 'red', 'font-weight': 'bold'}),
+            html.B("Stage Length: "), html.Span(f"{stage_length:.2f} meters" if isinstance(stage_length, (int, float)) else stage_length, style={'color': 'red', 'font-weight': 'bold'}),
             html.Br(),
             html.B(f"Mix A: "), html.Span(f"{mix_a_volume:.2f} L", style={'color': 'red', 'font-weight': 'bold'}),
             html.Br(),
@@ -514,9 +496,9 @@ def update_injection_details(data, selected_stage, selected_hole_id):
             html.Br(),
             html.B("Cumulative Zero Flow: "), html.Span(f"{zero_flow_interval:.2f} hours", style={'color': 'red', 'font-weight': 'bold'}),
             html.Br(),
-            html.B("Water Table: "), html.Span(f"{water_depth:.2f} meters" if water_depth is not None else "N/A", style={'color': 'red', 'font-weight': 'bold'}),
+            html.B("Water Table: "), html.Span(f"{water_depth:.2f} meters" if isinstance(water_depth, (int, float)) else water_depth, style={'color': 'red', 'font-weight': 'bold'}),
             html.Br(),
-            html.B("V water: "), html.Span(f"{v_marsh_water:.2f} {'(reported correctly)' if 25.6 <= v_marsh_water <= 26.8 else ''}" if v_marsh_water is not None else "N/A", style={'color': 'red', 'font-weight': 'bold'}),
+            html.B("V water: "), html.Span(f"{v_marsh_water:.2f} {'(reported correctly)' if 25.6 <= v_marsh_water <= 26.8 else ''}" if isinstance(v_marsh_water, (int, float)) else v_marsh_water, style={'color': 'red', 'font-weight': 'bold'}),
             html.Br(),
         ]
 
@@ -754,17 +736,13 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
                 hovermode='x unified'
             )
 
-            injection_details = update_injection_details(df, stage, hole_id)
+            additional_data = {}  # We don't have additional data for uploaded files
+            injection_details = update_injection_details(df, stage, hole_id, additional_data)
             mix_summary = html.Div([
                 html.P(f"Mix {mix}: {count} times") for mix, count in mixes_and_marsh.items() if mix not in ['Cumulative Zero Flow']
             ])
             
-            stage_length = df['stageBottom'].iloc[0] - df['stageTop'].iloc[0]
             error_summary = []
-            if stage_length < 6:
-                error_summary.append("Short stage length detected")
-            elif stage_length > 6:
-                error_summary.append("Long stage length detected")
             error_summary.extend([html.Span(error, style={'color': 'red'}) for error in mixes_and_marsh.get('Errors', [])] or ["NA"])
             error_summary = html.Div(error_summary)
 
@@ -806,17 +784,13 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
                 hovermode='x unified'
             )
             
-            injection_details = update_injection_details(data, stage, hole_id)
+            additional_data = fetch_additional_data(hole_id, stage)
+            injection_details = update_injection_details(data, stage, hole_id, additional_data)
             mix_summary = html.Div([
                 html.P(f"Mix {mix}: {count} times") for mix, count in mixes_and_marsh.items() if mix not in ['Cumulative Zero Flow']
             ])
             
-            stage_length = data['stageBottom'].iloc[0] - data['stageTop'].iloc[0]
             error_summary = []
-            if stage_length < 6:
-                error_summary.append("Short stage length detected")
-            elif stage_length > 6:
-                error_summary.append("Long stage length detected")
             error_summary.extend([html.Span(error, style={'color': 'red'}) for error in mixes_and_marsh.get('Errors', [])] or ["NA"])
             error_summary = html.Div(error_summary)
 
@@ -824,8 +798,7 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
                 html.H3("GIV Operator Notes:"),
                 html.Pre(update_notes_table(notes_data))
             ]) if not notes_data.empty else ""
-
-            return f"Data for {hole_id} {stage} loaded successfully", "", fig, temp_fig, scatter_3d_fig, pie_fig, ma_fig, lugeon_fig, injection_details, mix_summary, error_summary, giv_operator_notes, ""
+return f"Data for {hole_id} {stage} loaded successfully", "", fig, temp_fig, scatter_3d_fig, pie_fig, ma_fig, lugeon_fig, injection_details, mix_summary, error_summary, giv_operator_notes, ""
         except Exception as e:
             error_message = f"Error loading data: {str(e)}"
             log_error(error_message)
