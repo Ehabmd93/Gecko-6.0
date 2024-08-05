@@ -25,6 +25,7 @@ import redis
 redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
 redis_client = redis.StrictRedis.from_url(redis_url)
 
+
 # Logging setup
 logging.basicConfig(filename='app_errors.log', level=logging.ERROR, 
                     format='%(asctime)s %(levelname)s: %(message)s')
@@ -789,7 +790,7 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
                 error_summary.append("Short stage length detected")
             elif stage_length > 6:
                 error_summary.append("Long stage length detected")
-            error_summary extend ([html.Span(error, style={'color': 'red'}) for error in mixes_and_marsh.get('Errors', [])] or ["NA"])
+            error_summary.extend([html.Span(error, style={'color': 'red'}) for error in mixes_and_marsh.get('Errors', [])] or ["NA"])
             error_summary = html.Div(error_summary)
 
             giv_operator_notes = html.Div([
@@ -805,17 +806,6 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
 
     raise PreventUpdate
 
-# New Callback to show stage volumes
-@app.callback(
-    Output('stage-volumes-graph', 'style'),
-    Output('stage-volumes-graph', 'figure'),
-    Input('show-stage-volumes-button', 'n_clicks'),
-    State('hole-id-dropdown', 'value'),
-    State('stage-dropdown', 'value')
-)
-def show_stage_volumes(n_clicks, hole_id, selected_stage):
-    if n_clicks is None or not hole_id or not selected_stage:
-        raise PreventUpdate
     
     df = calculate_stage_volumes()
     if df.empty:
