@@ -19,7 +19,13 @@ from sqlalchemy import create_engine, Table, Column, Integer, String, MetaData, 
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import QueuePool
 import logging
+import redis
 
+# Configure Redis
+redis_url = 'redis://red-cqoaomogph6c73b69bl0:6379'
+redis_client = redis.StrictRedis.from_url(redis_url)
+
+# Logging setup
 logging.basicConfig(filename='app_errors.log', level=logging.ERROR, 
                     format='%(asctime)s %(levelname)s: %(message)s')
 
@@ -71,21 +77,29 @@ processed_data = Table(
 # Create tables if they don't exist
 metadata.create_all(engine)
 
-@lru_cache(maxsize=None)
 def get_unique_values(table_name, column_name, hole_id=None):
+    cache_key = f"{table_name}_{column_name}_{hole_id}" if hole_id else f"{table_name}_{column_name}"
+    cached_result = redis_client.get(cache_key)
+    
+    if cached_result:
+        return json.loads(cached_result)
+    
     try:
         with engine.connect() as connection:
             if column_name == 'hole_id':
                 query = text("SELECT DISTINCT hole_id FROM processed_data ORDER BY hole_id")
                 result = connection.execute(query)
-                return [row[0] for row in result]
+                unique_values = [row[0] for row in result]
             elif column_name == 'stage':
                 if hole_id:
                     query = text("SELECT DISTINCT stage FROM processed_data WHERE hole_id = :hole_id ORDER BY stage")
                     result = connection.execute(query, {"hole_id": hole_id})
-                    return [row[0] for row in result]
+                    unique_values = [row[0] for row in result]
                 else:
                     return []
+            
+            redis_client.set(cache_key, json.dumps(unique_values), ex=3600)  # Cache for 1 hour
+            return unique_values
     except Exception as e:
         log_error(f"Error getting unique values: {e}")
         return []
@@ -160,7 +174,8 @@ def store_processed_data(df, hole_id, stage):
 def retrieve_processed_data(hole_id, stage):
     try:
         query = text("""
-            SELECT * FROM processed_data 
+            SELECT "TIMESTAMP", flow, effPressure, gaugePressure, Lugeon, volume, mixNum, vmarshGrout, PTemp, Notes
+            FROM processed_data 
             WHERE hole_id = :hole_id AND stage = :stage
             ORDER BY "TIMESTAMP"
         """)
@@ -171,7 +186,6 @@ def retrieve_processed_data(hole_id, stage):
         else:
             print(f"Retrieved {len(df)} rows for hole_id: {hole_id} and stage: {stage}")
         
-        # Clean the Notes column
         if 'Notes' in df.columns:
             df['Notes'] = df['Notes'].replace({'NaN': None, 'nan': None}).fillna('')
         
@@ -200,7 +214,7 @@ def track_mixes_and_marsh_values(data):
             current_mix = 'B'
         elif mix_num == 4 and current_mix == 'B':
             current_mix = 'C'
-        elif mix_num == 5 and current_mix == 'C':
+        elif mix_num == 5 and current_mix == 'D':
             current_mix = 'D'
 
     zero_flow_interval = calculate_cumulative_zero_flow(data)
@@ -396,27 +410,13 @@ def add_trace(fig, data, name, y_col, color, yaxis='y'):
 
 def calculate_cumulative_zero_flow(data):
     try:
-        # Convert TIMESTAMP to datetime if it's not already
         data['TIMESTAMP'] = pd.to_datetime(data['TIMESTAMP'])
-        
-        # Create a mask for zero flow
         zero_flow_mask = data['flow'] == 0
-        
-        # Create groups of consecutive zero flow periods
         zero_flow_groups = (zero_flow_mask != zero_flow_mask.shift()).cumsum()[zero_flow_mask]
-        
-        # Calculate the duration of each zero flow period
         zero_flow_durations = data[zero_flow_mask].groupby(zero_flow_groups)['TIMESTAMP'].agg(['first', 'last'])
         zero_flow_durations['duration'] = (zero_flow_durations['last'] - zero_flow_durations['first']).dt.total_seconds() / 3600
-        
-        # Sum durations of periods longer than 10 minutes (0.1667 hours)
         cumulative_zero_flow = zero_flow_durations[zero_flow_durations['duration'] > 0.1667]['duration'].sum()
-        
-        # Ensure the result is not negative
         cumulative_zero_flow = max(0, cumulative_zero_flow)
-        
-        print(f"Debug: Cumulative zero flow calculated as {cumulative_zero_flow:.2f} hours")
-        
         return cumulative_zero_flow
     except Exception as e:
         log_error(f"Error calculating cumulative zero flow: {e}")
@@ -430,7 +430,6 @@ def calculate_grout_and_mix_volumes(data):
         mix_b_volume = mix_volumes.get(3, 0)
         mix_c_volume = mix_volumes.get(4, 0)
         mix_d_volume = mix_volumes.get(5, 0)
-
         return mix_a_volume, mix_b_volume, mix_c_volume, mix_d_volume, cumulative_grout
     except Exception as e:
         log_error(f"Error calculating grout and mix volumes: {e}")
@@ -438,50 +437,23 @@ def calculate_grout_and_mix_volumes(data):
 
 def update_injection_details(data, selected_stage, selected_hole_id):
     try:
-        # Data validation checks
-        print(f"Debug: Data shape: {data.shape}")
-        print(f"Debug: Columns: {data.columns.tolist()}")
-        print(f"Debug: Flow column dtype: {data['flow'].dtype}")
-        print(f"Debug: Flow column range: {data['flow'].min()} to {data['flow'].max()}")
-        print(f"Debug: Timestamp range: {data['TIMESTAMP'].min()} to {data['TIMESTAMP'].max()}")
-        
-        # Check for negative flows
-        negative_flows = data[data['flow'] < 0]
-        if not negative_flows.empty:
-            print(f"Warning: Negative flows detected: {len(negative_flows)} rows")
-
-        # Check for duplicate timestamps
-        duplicate_timestamps = data[data.duplicated('TIMESTAMP', keep=False)]
-        if not duplicate_timestamps.empty:
-            print(f"Warning: Duplicate timestamps detected: {len(duplicate_timestamps)} rows")
-
         data['TIMESTAMP'] = pd.to_datetime(data['TIMESTAMP'])
         non_zero_flow = data[data['flow'] > 0]
         first_non_zero_flow_time = non_zero_flow['TIMESTAMP'].min()
         last_timestamp = data['TIMESTAMP'].max()
-
         stage_top = data.loc[data['TIMESTAMP'].idxmin(), 'stageTop']
         stage_bottom = data.loc[data['TIMESTAMP'].idxmin(), 'stageBottom']
         stage_length = stage_bottom - stage_top
-
         first_date = first_non_zero_flow_time.strftime('%Y-%m-%d')
         first_time = first_non_zero_flow_time.strftime('%H:%M:%S')
         last_date = last_timestamp.strftime('%Y-%m-%d')
         last_time = last_timestamp.strftime('%H:%M:%S')
-
         mix_a_volume, mix_b_volume, mix_c_volume, mix_d_volume, cumulative_volume = calculate_grout_and_mix_volumes(data)
-
         total_grouting_time = (last_timestamp - first_non_zero_flow_time).total_seconds() / 3600
         zero_flow_interval = calculate_cumulative_zero_flow(data)
         net_grouting_time = total_grouting_time - zero_flow_interval
-
-        print(f"Debug: Total grouting time: {total_grouting_time:.2f} hours")
-        print(f"Debug: Zero flow interval: {zero_flow_interval:.2f} hours")
-        print(f"Debug: Net grouting time: {net_grouting_time:.2f} hours")
-
         water_depth = data['waterDepth'].iloc[0]
         v_marsh_water = data['vmarshWater'].iloc[0]
-
         details = [
             html.H2("Grout Injection Summary"),
             html.B("Hole ID: "), html.Span(f"{selected_hole_id}", style={'color': 'red', 'font-weight': 'bold'}),
@@ -963,15 +935,12 @@ def open_email_client(n_clicks):
 def print_report(n_clicks, figure, temp_figure, scatter_3d_figure, pie_figure, ma_figure, lugeon_figure, injection_details, mix_summary, error_summary, giv_operator_notes, recipe_table_data, qc_by):
     if n_clicks > 0:
         try:
-            # Convert the figures to HTML divs
             plot_div = pio.to_html(figure, full_html=False)
             temp_plot_div = pio.to_html(temp_figure, full_html=False)
             scatter_3d_plot_div = pio.to_html(scatter_3d_figure, full_html=False)
             pie_chart_div = pio.to_html(pie_figure, full_html=False)
             ma_plot_div = pio.to_html(ma_figure, full_html=False)
             lugeon_plot_div = pio.to_html(lugeon_figure, full_html=False)
-
-            # Convert recipe table to HTML
             recipe_table_html = """
             <table border="1">
                 <tr>
@@ -1002,7 +971,6 @@ def print_report(n_clicks, figure, temp_figure, scatter_3d_figure, pie_figure, m
                 """
             recipe_table_html += "</table>"
 
-            # Create the HTML content
             html_content = f"""
             <html>
                 <head>
@@ -1071,15 +1039,12 @@ def print_report(n_clicks, figure, temp_figure, scatter_3d_figure, pie_figure, m
             </html>
             """
 
-            # Write the HTML content to a file
             output_path = 'Grout_Gecko_V1.0_QHBW_Grouting_Data_QC_Report.html'
             with open(output_path, 'w', encoding='utf-8') as f:
                 f.write(html_content)
-
-            # Open the HTML file in the default web browser
+            
             import webbrowser
             webbrowser.open('file://' + os.path.realpath(output_path), new=2)
-
             print(f"HTML report generated and opened: {output_path}")
 
         except Exception as e:
