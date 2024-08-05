@@ -2,9 +2,8 @@ import sys
 import numpy as np
 import pandas as pd
 import dash
-from dash import Dash, dcc, html, Input, Output, State, dash_table, clientside_callback
+from dash import Dash, dcc, html, Input, Output, State, dash_table
 from dash.exceptions import PreventUpdate
-from dash.long_callback import DiskcacheLongCallbackManager
 import plotly.graph_objects as go
 import plotly.express as px
 import plotly.io as pio
@@ -15,17 +14,12 @@ import datetime as dt
 import os
 import time
 import json
-import zlib
-import pickle
 from functools import lru_cache
 from sqlalchemy import create_engine, Table, Column, Integer, String, MetaData, Float, TIMESTAMP, select, func, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import QueuePool
 import logging
-import redis
-import diskcache
 
-# Set up logging
 logging.basicConfig(filename='app_errors.log', level=logging.ERROR, 
                     format='%(asctime)s %(levelname)s: %(message)s')
 
@@ -34,18 +28,10 @@ def log_error(message):
     logging.error(message)  # Log to file
 
 # Environment variables
-DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://qhbw_sql_user:EJyTGHeLljJ1TCXlLtWPYPtrGDDzOLpg@dpg-cqkb5dbqf0us73c6a0lg-a.oregon-postgres.render.com/qhbw_sql')
-REDIS_URL = os.environ.get('REDIS_URL', 'redis://red-cql0cgt6l47c73f0loh0:6379')
+DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://qhbw_sql_vx26_user:glwGtA9yoGUtBrow7YdM9Ps80xNkGQIL@dpg-cqli5h08fa8c73aurv40-a.oregon-postgres.render.com/qhbw_sql_vx26')
 
 # Initialize SQLAlchemy engine with connection pooling
-engine = create_engine(DATABASE_URL, poolclass=QueuePool, pool_size=20, max_overflow=40, pool_pre_ping=True)
-
-# Initialize Redis client
-redis_client = redis.Redis.from_url(REDIS_URL)
-
-# Initialize diskcache for long callbacks
-cache = diskcache.Cache("./cache")
-long_callback_manager = DiskcacheLongCallbackManager(cache)
+engine = create_engine(DATABASE_URL, poolclass=QueuePool, pool_size=10, max_overflow=20, pool_pre_ping=True)
 
 # Define metadata
 metadata = MetaData()
@@ -85,53 +71,21 @@ processed_data = Table(
 # Create tables if they don't exist
 metadata.create_all(engine)
 
-# Redis caching functions
-def cache_data(key, data, expiration=3600):
-    """Cache data in Redis with compression"""
-    try:
-        compressed_data = zlib.compress(pickle.dumps(data))
-        redis_client.setex(key, expiration, compressed_data)
-    except Exception as e:
-        log_error(f"Error caching data: {e}")
-
-def get_cached_data(key):
-    """Retrieve cached data from Redis with decompression"""
-    try:
-        compressed_data = redis_client.get(key)
-        if compressed_data:
-            return pickle.loads(zlib.decompress(compressed_data))
-        return None
-    except Exception as e:
-        log_error(f"Error retrieving cached data: {e}")
-        return None
-
-def cache_key(prefix, *args):
-    """Generate a cache key"""
-    return f"{prefix}:{':'.join(str(arg) for arg in args)}"
-
 @lru_cache(maxsize=None)
 def get_unique_values(table_name, column_name, hole_id=None):
-    key = cache_key("unique_values", table_name, column_name, hole_id)
-    cached_values = get_cached_data(key)
-    if cached_values is not None:
-        return cached_values
-
     try:
         with engine.connect() as connection:
             if column_name == 'hole_id':
                 query = text("SELECT DISTINCT hole_id FROM processed_data ORDER BY hole_id")
                 result = connection.execute(query)
-                values = [row[0] for row in result]
+                return [row[0] for row in result]
             elif column_name == 'stage':
                 if hole_id:
                     query = text("SELECT DISTINCT stage FROM processed_data WHERE hole_id = :hole_id ORDER BY stage")
                     result = connection.execute(query, {"hole_id": hole_id})
-                    values = [row[0] for row in result]
+                    return [row[0] for row in result]
                 else:
-                    values = []
-        
-        cache_data(key, values)
-        return values
+                    return []
     except Exception as e:
         log_error(f"Error getting unique values: {e}")
         return []
@@ -203,33 +157,23 @@ def store_processed_data(df, hole_id, stage):
     except Exception as e:
         log_error(f"Error storing processed data: {e}")
 
-def retrieve_processed_data(hole_id, stage, offset=0, limit=None):
-    key = cache_key("processed_data", hole_id, stage, offset, limit)
-    cached_data = get_cached_data(key)
-    if cached_data is not None:
-        print(f"Retrieved {len(cached_data)} rows from cache for hole_id: {hole_id} and stage: {stage}")
-        return cached_data
-
+def retrieve_processed_data(hole_id, stage):
     try:
         query = text("""
             SELECT * FROM processed_data 
             WHERE hole_id = :hole_id AND stage = :stage
             ORDER BY "TIMESTAMP"
-            LIMIT :limit OFFSET :offset
         """)
-        df = pd.read_sql_query(query, engine, params={"hole_id": hole_id, "stage": stage, "limit": limit, "offset": offset})
+        df = pd.read_sql_query(query, engine, params={"hole_id": hole_id, "stage": stage})
         
         if df.empty:
             print(f"No data found for hole_id: {hole_id} and stage: {stage}")
         else:
-            print(f"Retrieved {len(df)} rows from database for hole_id: {hole_id} and stage: {stage}")
+            print(f"Retrieved {len(df)} rows for hole_id: {hole_id} and stage: {stage}")
         
         # Clean the Notes column
         if 'Notes' in df.columns:
             df['Notes'] = df['Notes'].replace({'NaN': None, 'nan': None}).fillna('')
-        
-        # Cache the data
-        cache_data(key, df)
         
         return df
     except Exception as e:
@@ -452,14 +396,27 @@ def add_trace(fig, data, name, y_col, color, yaxis='y'):
 
 def calculate_cumulative_zero_flow(data):
     try:
+        # Convert TIMESTAMP to datetime if it's not already
         data['TIMESTAMP'] = pd.to_datetime(data['TIMESTAMP'])
+        
+        # Create a mask for zero flow
         zero_flow_mask = data['flow'] == 0
+        
+        # Create groups of consecutive zero flow periods
         zero_flow_groups = (zero_flow_mask != zero_flow_mask.shift()).cumsum()[zero_flow_mask]
+        
+        # Calculate the duration of each zero flow period
         zero_flow_durations = data[zero_flow_mask].groupby(zero_flow_groups)['TIMESTAMP'].agg(['first', 'last'])
         zero_flow_durations['duration'] = (zero_flow_durations['last'] - zero_flow_durations['first']).dt.total_seconds() / 3600
+        
+        # Sum durations of periods longer than 10 minutes (0.1667 hours)
         cumulative_zero_flow = zero_flow_durations[zero_flow_durations['duration'] > 0.1667]['duration'].sum()
+        
+        # Ensure the result is not negative
         cumulative_zero_flow = max(0, cumulative_zero_flow)
+        
         print(f"Debug: Cumulative zero flow calculated as {cumulative_zero_flow:.2f} hours")
+        
         return cumulative_zero_flow
     except Exception as e:
         log_error(f"Error calculating cumulative zero flow: {e}")
@@ -481,16 +438,19 @@ def calculate_grout_and_mix_volumes(data):
 
 def update_injection_details(data, selected_stage, selected_hole_id):
     try:
+        # Data validation checks
         print(f"Debug: Data shape: {data.shape}")
         print(f"Debug: Columns: {data.columns.tolist()}")
         print(f"Debug: Flow column dtype: {data['flow'].dtype}")
         print(f"Debug: Flow column range: {data['flow'].min()} to {data['flow'].max()}")
         print(f"Debug: Timestamp range: {data['TIMESTAMP'].min()} to {data['TIMESTAMP'].max()}")
         
+        # Check for negative flows
         negative_flows = data[data['flow'] < 0]
         if not negative_flows.empty:
             print(f"Warning: Negative flows detected: {len(negative_flows)} rows")
 
+        # Check for duplicate timestamps
         duplicate_timestamps = data[data.duplicated('TIMESTAMP', keep=False)]
         if not duplicate_timestamps.empty:
             print(f"Warning: Duplicate timestamps detected: {len(duplicate_timestamps)} rows")
@@ -576,24 +536,10 @@ def apply_tma(data, window_size=5):
     return data
 
 def calculate_stage_volumes():
-    cache_key = "stage_volumes"
-    cached_data = get_cached_data(cache_key)
-    if cached_data is not None:
-        return cached_data
-
     try:
-        query = text("""
-            SELECT stage, hole_id, MAX(volume) as total_volume 
-            FROM processed_data 
-            GROUP BY stage, hole_id 
-            ORDER BY total_volume
-        """)
+        query = text("SELECT stage, hole_id, MAX(volume) as total_volume FROM processed_data GROUP BY stage, hole_id ORDER BY total_volume")
         df = pd.read_sql_query(query, engine)
         df['stage_hole_id'] = df['stage'] + ', ' + df['hole_id']
-        
-        # Cache the result
-        cache_data(cache_key, df)
-        
         return df
     except Exception as e:
         log_error(f"Error calculating stage volumes: {e}")
