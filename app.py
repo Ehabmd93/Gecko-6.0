@@ -2,8 +2,9 @@ import sys
 import numpy as np
 import pandas as pd
 import dash
-from dash import Dash, dcc, html, Input, Output, State, dash_table
+from dash import Dash, dcc, html, Input, Output, State, dash_table, clientside_callback
 from dash.exceptions import PreventUpdate
+from dash.long_callback import DiskcacheLongCallbackManager
 import plotly.graph_objects as go
 import plotly.express as px
 import plotly.io as pio
@@ -14,12 +15,15 @@ import datetime as dt
 import os
 import time
 import json
+import zlib
+import pickle
 from functools import lru_cache
 from sqlalchemy import create_engine, Table, Column, Integer, String, MetaData, Float, TIMESTAMP, select, func, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import QueuePool
 import logging
 import redis
+import diskcache
 
 # Set up logging
 logging.basicConfig(filename='app_errors.log', level=logging.ERROR, 
@@ -30,14 +34,18 @@ def log_error(message):
     logging.error(message)  # Log to file
 
 # Environment variables
-DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://qhbw_sql_vx26_user:glwGtA9yoGUtBrow7YdM9Ps80xNkGQIL@dpg-cqli5h08fa8c73aurv40-a.oregon-postgres.render.com/qhbw_sql_vx26')
-REDIS_URL = os.environ.get('REDIS_URL', 'redis://red-cqoaomogph6c73b69bl0:6379')
+DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://qhbw_sql_user:EJyTGHeLljJ1TCXlLtWPYPtrGDDzOLpg@dpg-cqkb5dbqf0us73c6a0lg-a.oregon-postgres.render.com/qhbw_sql')
+REDIS_URL = os.environ.get('REDIS_URL', 'redis://red-cql0cgt6l47c73f0loh0:6379')
 
 # Initialize SQLAlchemy engine with connection pooling
-engine = create_engine(DATABASE_URL, poolclass=QueuePool, pool_size=10, max_overflow=20, pool_pre_ping=True)
+engine = create_engine(DATABASE_URL, poolclass=QueuePool, pool_size=20, max_overflow=40, pool_pre_ping=True)
 
 # Initialize Redis client
 redis_client = redis.Redis.from_url(REDIS_URL)
+
+# Initialize diskcache for long callbacks
+cache = diskcache.Cache("./cache")
+long_callback_manager = DiskcacheLongCallbackManager(cache)
 
 # Define metadata
 metadata = MetaData()
@@ -79,29 +87,34 @@ metadata.create_all(engine)
 
 # Redis caching functions
 def cache_data(key, data, expiration=3600):
-    """Cache data in Redis"""
+    """Cache data in Redis with compression"""
     try:
-        redis_client.setex(key, expiration, json.dumps(data.to_dict('records')))
+        compressed_data = zlib.compress(pickle.dumps(data))
+        redis_client.setex(key, expiration, compressed_data)
     except Exception as e:
         log_error(f"Error caching data: {e}")
 
 def get_cached_data(key):
-    """Retrieve cached data from Redis"""
+    """Retrieve cached data from Redis with decompression"""
     try:
-        data = redis_client.get(key)
-        if data:
-            return pd.DataFrame(json.loads(data))
+        compressed_data = redis_client.get(key)
+        if compressed_data:
+            return pickle.loads(zlib.decompress(compressed_data))
         return None
     except Exception as e:
         log_error(f"Error retrieving cached data: {e}")
         return None
 
+def cache_key(prefix, *args):
+    """Generate a cache key"""
+    return f"{prefix}:{':'.join(str(arg) for arg in args)}"
+
 @lru_cache(maxsize=None)
 def get_unique_values(table_name, column_name, hole_id=None):
-    cache_key = f"unique_values:{table_name}:{column_name}:{hole_id}"
-    cached_values = get_cached_data(cache_key)
+    key = cache_key("unique_values", table_name, column_name, hole_id)
+    cached_values = get_cached_data(key)
     if cached_values is not None:
-        return cached_values.iloc[:, 0].tolist()
+        return cached_values
 
     try:
         with engine.connect() as connection:
@@ -117,8 +130,7 @@ def get_unique_values(table_name, column_name, hole_id=None):
                 else:
                     values = []
         
-        df_values = pd.DataFrame(values, columns=[column_name])
-        cache_data(cache_key, df_values)
+        cache_data(key, values)
         return values
     except Exception as e:
         log_error(f"Error getting unique values: {e}")
@@ -191,9 +203,9 @@ def store_processed_data(df, hole_id, stage):
     except Exception as e:
         log_error(f"Error storing processed data: {e}")
 
-def retrieve_processed_data(hole_id, stage):
-    cache_key = f"processed_data:{hole_id}:{stage}"
-    cached_data = get_cached_data(cache_key)
+def retrieve_processed_data(hole_id, stage, offset=0, limit=None):
+    key = cache_key("processed_data", hole_id, stage, offset, limit)
+    cached_data = get_cached_data(key)
     if cached_data is not None:
         print(f"Retrieved {len(cached_data)} rows from cache for hole_id: {hole_id} and stage: {stage}")
         return cached_data
@@ -203,8 +215,9 @@ def retrieve_processed_data(hole_id, stage):
             SELECT * FROM processed_data 
             WHERE hole_id = :hole_id AND stage = :stage
             ORDER BY "TIMESTAMP"
+            LIMIT :limit OFFSET :offset
         """)
-        df = pd.read_sql_query(query, engine, params={"hole_id": hole_id, "stage": stage})
+        df = pd.read_sql_query(query, engine, params={"hole_id": hole_id, "stage": stage, "limit": limit, "offset": offset})
         
         if df.empty:
             print(f"No data found for hole_id: {hole_id} and stage: {stage}")
@@ -216,7 +229,7 @@ def retrieve_processed_data(hole_id, stage):
             df['Notes'] = df['Notes'].replace({'NaN': None, 'nan': None}).fillna('')
         
         # Cache the data
-        cache_data(cache_key, df)
+        cache_data(key, df)
         
         return df
     except Exception as e:
