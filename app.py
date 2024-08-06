@@ -1,8 +1,6 @@
 import sys
 import numpy as np
 import pandas as pd
-import dask.dataframe as dd
-from dask.distributed import Client
 import dash
 from dash import Dash, dcc, html, Input, Output, State, dash_table
 from dash.exceptions import PreventUpdate
@@ -21,6 +19,8 @@ from sqlalchemy import create_engine, Table, Column, Integer, String, MetaData, 
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import QueuePool
 import logging
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 
 # Set up Dask client
 client = Client()
@@ -531,6 +531,13 @@ def update_injection_details(data, selected_stage, selected_hole_id):
         log_error(f"Error updating injection details: {e}")
         return "Error updating injection details"
 
+def parallel_apply(df, func, num_partitions=4):
+    df_split = np.array_split(df, num_partitions)
+    pool = ProcessPoolExecutor(max_workers=num_partitions)
+    df = pd.concat(pool.map(func, df_split))
+    pool.shutdown()
+    return df
+
 def apply_tma(data, window_size=5):
     weights = np.arange(1, window_size + 1)
     weights = np.concatenate([weights, weights[:-1][::-1]])
@@ -541,15 +548,20 @@ def apply_tma(data, window_size=5):
     
     return data
 
+def parallel_tma(data, window_size=5):
+    return parallel_apply(data, lambda x: apply_tma(x, window_size))
+
 def calculate_stage_volumes():
     try:
         query = text("SELECT stage, hole_id, MAX(volume) as total_volume FROM processed_data GROUP BY stage, hole_id ORDER BY total_volume")
-        df = dd.read_sql_query(query, engine)
+        with engine.connect() as connection:
+            df = pd.read_sql_query(query, connection)
         df['stage_hole_id'] = df['stage'] + ', ' + df['hole_id']
-        return df.compute()
+        return df
     except Exception as e:
         log_error(f"Error calculating stage volumes: {e}")
-        return dd.from_pandas(pd.DataFrame(columns=['stage', 'hole_id', 'total_volume']))
+        return pd.DataFrame(columns=['stage', 'hole_id', 'total_volume'])
+
 
 # Load and encode the Gecko logo
 encoded_logo = None
@@ -742,14 +754,14 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
 
     if trigger_id == 'upload-data' and contents:
         try:
-            df, mixes_and_marsh = client.compute(parse_contents(contents, filename)).result()
+            df, mixes_and_marsh = parse_contents(contents, filename)
             if df is None:
                 raise ValueError("Error parsing file contents")
 
-            fig, temp_fig, scatter_3d_fig, pie_fig, data, notes_data, lugeon_fig = client.compute(generate_interactive_graph(df)).result()
+            fig, temp_fig, scatter_3d_fig, pie_fig, data, notes_data, lugeon_fig = generate_interactive_graph(df)
             
             # Generate MA graph
-            df_ma = client.compute(apply_tma(df)).result()
+            df_ma = parallel_tma(df)
             ma_fig = go.Figure()
             add_trace(ma_fig, df_ma, 'Flow Rate (MA)', 'flow_tma', 'blue')
             add_trace(ma_fig, df_ma, 'Effective Pressure (MA)', 'effPressure_tma', 'green', yaxis='y2')
@@ -760,12 +772,12 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
                 hovermode='x unified'
             )
 
-            injection_details = client.compute(update_injection_details(df, stage, hole_id)).result()
+            injection_details = update_injection_details(df, stage, hole_id)
             mix_summary = html.Div([
                 html.P(f"Mix {mix}: {count} times") for mix, count in mixes_and_marsh.items() if mix not in ['Cumulative Zero Flow']
             ])
             
-            stage_length = df['stageBottom'].compute().iloc[0] - df['stageTop'].compute().iloc[0]
+            stage_length = df['stageBottom'].iloc[0] - df['stageTop'].iloc[0]
             error_summary = []
             if stage_length < 6:
                 error_summary.append("Short stage length detected")
@@ -789,19 +801,19 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
     elif trigger_id == 'load-data-button' and hole_id and stage:
         try:
             print(f"Attempting to load data for hole_id: {hole_id}, stage: {stage}")
-            data = client.compute(retrieve_processed_data(hole_id, stage)).result()
-            if data is None or data.npartitions == 0:
+            data = retrieve_processed_data(hole_id, stage)
+            if data is None or data.empty:
                 error_message = f"No data found for Hole ID: {hole_id} and Stage: {stage}"
                 log_error(error_message)
                 return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
 
             print(f"Data retrieved successfully. Shape: {data.shape}")
-            mixes_and_marsh = client.compute(track_mixes_and_marsh_values(data)).result()
+            mixes_and_marsh = track_mixes_and_marsh_values(data)
             
-            fig, temp_fig, scatter_3d_fig, pie_fig, _, notes_data, lugeon_fig = client.compute(generate_interactive_graph(data)).result()
+            fig, temp_fig, scatter_3d_fig, pie_fig, _, notes_data, lugeon_fig = generate_interactive_graph(data)
             
             # Generate MA graph
-            data_ma = client.compute(apply_tma(data)).result()
+            data_ma = parallel_tma(data)
             ma_fig = go.Figure()
             add_trace(ma_fig, data_ma, 'Flow Rate (MA)', 'flow_tma', 'blue')
             add_trace(ma_fig, data_ma, 'Effective Pressure (MA)', 'effPressure_tma', 'green', yaxis='y2')
@@ -812,12 +824,12 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
                 hovermode='x unified'
             )
             
-            injection_details = client.compute(update_injection_details(data, stage, hole_id)).result()
+            injection_details = update_injection_details(data, stage, hole_id)
             mix_summary = html.Div([
                 html.P(f"Mix {mix}: {count} times") for mix, count in mixes_and_marsh.items() if mix not in ['Cumulative Zero Flow']
             ])
             
-            stage_length = data['stageBottom'].compute().iloc[0] - data['stageTop'].compute().iloc[0]
+            stage_length = data['stageBottom'].iloc[0] - data['stageTop'].iloc[0]
             error_summary = []
             if stage_length < 6:
                 error_summary.append("Short stage length detected")
