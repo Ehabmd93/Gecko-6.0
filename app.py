@@ -77,7 +77,22 @@ processed_data = Table(
 metadata.create_all(engine)
 
 # Dask configuration
-dask.config.set({"dataframe.query-planning": False})
+dask.config.set({
+    "dataframe.query-planning": False,
+    "dataframe.backend": "pandas",
+    "scheduler.worker-ttl": None
+})
+
+# Initialize Dask client
+def initialize_dask_client():
+    return Client(LocalCluster(processes=False, threads_per_worker=4, n_workers=2))
+
+# Use this function to get the client when needed
+def get_dask_client():
+    global client
+    if 'client' not in globals() or not client.scheduler_info():
+        client = initialize_dask_client()
+    return client
 
 @lru_cache(maxsize=None)
 def get_unique_values(table_name, column_name, hole_id=None):
@@ -119,9 +134,9 @@ def clean_data(data):
             'waterDepth', 'holeAngle', 'vmarshGrout', 'vmarshWater', 'Notes'
         ]
         
-        data = data.drop([0, 1, 2]).reset_index(drop=True)
+        data = data.npartitions_known().reset_index(drop=True)
         data.columns = headers
-        data = data.drop(data.index[0])
+        data = data.iloc[1:]  # Drop the first row
 
         data['TIMESTAMP'] = dd.to_datetime(data['TIMESTAMP'], errors='coerce')
         data = data.dropna(subset=['TIMESTAMP'])
@@ -142,9 +157,10 @@ def parse_contents(contents, filename):
     decoded = base64.b64decode(content_string)
     try:
         if 'csv' in filename:
-            df = dd.from_pandas(pd.read_csv(io.StringIO(decoded.decode('utf-8'))), npartitions=4)
+            df = dd.read_csv(io.BytesIO(decoded))
         elif 'xls' in filename or 'xlsx' in filename:
-            df = dd.from_pandas(pd.read_excel(io.BytesIO(decoded), sheet_name='Raw Data', engine='openpyxl' if 'xlsx' in filename else 'xlrd'), npartitions=4)
+            pandas_df = pd.read_excel(io.BytesIO(decoded), sheet_name='Raw Data', engine='openpyxl' if 'xlsx' in filename else 'xlrd')
+            df = dd.from_pandas(pandas_df, npartitions=4)
         else:
             raise ValueError("Unsupported file type")
         cleaned_data = clean_data(df)
@@ -168,12 +184,9 @@ def store_processed_data(df, hole_id, stage):
 
 def retrieve_processed_data(hole_id, stage):
     try:
-        query = text("""
-            SELECT * FROM processed_data 
-            WHERE hole_id = :hole_id AND stage = :stage
-            ORDER BY "TIMESTAMP"
-        """)
-        df = dd.read_sql_query(query, engine, params={"hole_id": hole_id, "stage": stage}, index_col='id')
+        client = get_dask_client()
+        query = f"SELECT * FROM processed_data WHERE hole_id = '{hole_id}' AND stage = '{stage}' ORDER BY TIMESTAMP"
+        df = dd.read_sql_table('processed_data', engine, index_col='id', query=query)
         
         if df.npartitions == 0:
             print(f"No data found for hole_id: {hole_id} and stage: {stage}")
@@ -258,6 +271,7 @@ def generate_interactive_graph(data):
         if data is None or data.npartitions == 0:
             return None, None, None, None, None, None, None
 
+        client = get_dask_client()
         marsh_changes = identify_marsh_changes(data)
         notes_data = extract_notes(data)
 
@@ -316,7 +330,6 @@ def generate_interactive_graph(data):
             name='Temperature',
             line=dict(color='red')
         ))
-       
         temp_fig.update_layout(
             title='Temperature vs Time',
             xaxis_title='Time Elapsed (Minutes)',
@@ -741,8 +754,10 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
     ctx = dash.callback_context
     trigger_id = ctx.triggered[0]['prop_id'].split('.')[0]
 
-    if trigger_id == 'upload-data' and contents:
-        try:
+    try:
+        client = get_dask_client()
+        
+        if trigger_id == 'upload-data' and contents:
             df, mixes_and_marsh = parse_contents(contents, filename)
             if df is None:
                 raise ValueError("Error parsing file contents")
@@ -782,19 +797,12 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
 
             return (f"File '{filename}' processed successfully", "",
                     fig, temp_fig, scatter_3d_fig, pie_fig, ma_fig, lugeon_fig, injection_details, mix_summary, error_summary, giv_operator_notes, "")
-        except Exception as e:
-            error_message = f"Error processing file: {str(e)}"
-            log_error(error_message)
-            return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
 
-    elif trigger_id == 'load-data-button' and hole_id and stage:
-        try:
+        elif trigger_id == 'load-data-button' and hole_id and stage:
             print(f"Attempting to load data for hole_id: {hole_id}, stage: {stage}")
             data = retrieve_processed_data(hole_id, stage)
             if data is None or data.npartitions == 0:
-                error_message = f"No data found for Hole ID: {hole_id} and Stage: {stage}"
-                log_error(error_message)
-                return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
+                raise ValueError(f"No data found for Hole ID: {hole_id} and Stage: {stage}")
 
             print(f"Data retrieved successfully. Shape: {data.shape[0].compute()} rows")
             mixes_and_marsh = track_mixes_and_marsh_values(data)
@@ -834,10 +842,11 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
             ]) if not notes_data.empty else ""
 
             return f"Data for {hole_id} {stage} loaded successfully", "", fig, temp_fig, scatter_3d_fig, pie_fig, ma_fig, lugeon_fig, injection_details, mix_summary, error_summary, giv_operator_notes, ""
-        except Exception as e:
-            error_message = f"Error loading data: {str(e)}"
-            log_error(error_message)
-            return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
+
+    except Exception as e:
+        error_message = f"Error processing data: {str(e)}"
+        log_error(error_message)
+        return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
 
     raise PreventUpdate
 
@@ -1094,6 +1103,5 @@ def print_report(n_clicks, figure, temp_figure, scatter_3d_figure, pie_figure, m
     return 0
 
 if __name__ == '__main__':
-    # Initialize Dask client
-    client = Client(LocalCluster(processes=False))
+    client = initialize_dask_client()
     app.run_server(debug=False)
