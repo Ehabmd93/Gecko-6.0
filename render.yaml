@@ -2,12 +2,6 @@ services:
   - type: web
     name: grout-gecko
     env: python
-    region: oregon
     plan: free
-    buildCommand: |
-      pip install --upgrade pip
-      pip install -r requirements.txt
-    startCommand: gunicorn app:server --config gunicorn_config.py
-    envVars:
-      - key: DATABASE_URL
-        value: your_database_url_here
+    buildCommand: ""
+    startCommand: "gunicorn app:server -c gunicorn_config.py"
