@@ -1,13 +1,11 @@
 services:
   - type: web
-    name: gecko-app
+    name: grout-gecko
     env: python
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:server
     envVars:
-      - key: DATABASE_URL
-        value: postgresql://qhbw_sql_user:EJyTGHeLljJ1TCXlLtWPYPtrGDDzOLpg@dpg-cqkb5dbqf0us73c6a0lg-a.oregon-postgres.render.com/qhbw_sql
-      - key: REDIS_URL
-        value: redis://red-cql0cgt6l47c73f0loh0:6379
       - key: PYTHON_VERSION
-        value: 3.11.9
+        value: 3.9.16
+      - key: DATABASE_URL
+        sync: false
