@@ -19,6 +19,7 @@ from sqlalchemy import create_engine, Table, Column, Integer, String, MetaData, 
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import QueuePool
 import logging
+import dask
 import dask.dataframe as dd
 from dask.distributed import Client, LocalCluster
 import webbrowser
@@ -75,8 +76,8 @@ processed_data = Table(
 # Create tables if they don't exist
 metadata.create_all(engine)
 
-# Initialize Dask client
-client = Client(LocalCluster())
+# Dask configuration
+dask.config.set({"dataframe.query-planning": False})
 
 @lru_cache(maxsize=None)
 def get_unique_values(table_name, column_name, hole_id=None):
@@ -141,7 +142,7 @@ def parse_contents(contents, filename):
     decoded = base64.b64decode(content_string)
     try:
         if 'csv' in filename:
-            df = dd.read_csv(io.BytesIO(decoded))
+            df = dd.from_pandas(pd.read_csv(io.StringIO(decoded.decode('utf-8'))), npartitions=4)
         elif 'xls' in filename or 'xlsx' in filename:
             df = dd.from_pandas(pd.read_excel(io.BytesIO(decoded), sheet_name='Raw Data', engine='openpyxl' if 'xlsx' in filename else 'xlrd'), npartitions=4)
         else:
@@ -189,19 +190,23 @@ def retrieve_processed_data(hole_id, stage):
         return None
 
 def track_mixes_and_marsh_values(data):
-    mix_counts = data.groupby('mixNum').size().compute().to_dict()
-    marsh_changes = data['vmarshGrout'].ne(data['vmarshGrout'].shift()).compute().sum()
-    
-    zero_flow_interval = calculate_cumulative_zero_flow(data)
+    try:
+        mix_counts = data.groupby('mixNum').size().compute().to_dict()
+        marsh_changes = data['vmarshGrout'].ne(data['vmarshGrout'].shift()).compute().sum()
+        
+        zero_flow_interval = calculate_cumulative_zero_flow(data)
 
-    return {
-        'Mix A': mix_counts.get(2, 0),
-        'Mix B': mix_counts.get(3, 0),
-        'Mix C': mix_counts.get(4, 0),
-        'Mix D': mix_counts.get(5, 0),
-        'Marsh Changes': marsh_changes,
-        'Cumulative Zero Flow': zero_flow_interval
-    }
+        return {
+            'Mix A': mix_counts.get(2, 0),
+            'Mix B': mix_counts.get(3, 0),
+            'Mix C': mix_counts.get(4, 0),
+            'Mix D': mix_counts.get(5, 0),
+            'Marsh Changes': marsh_changes,
+            'Cumulative Zero Flow': zero_flow_interval
+        }
+    except Exception as e:
+        log_error(f"Error tracking mixes and marsh values: {e}")
+        return {}
 
 def identify_marsh_changes(data):
     try:
@@ -299,6 +304,27 @@ def generate_interactive_graph(data):
             yaxis=dict(title='Flow Rate (L/min)', side='left'),
             yaxis2=dict(title='Effective Pressure (bar)', overlaying='y', side='right'),
             hovermode='x unified'
+        )
+
+        # Create temperature plot
+        temp_fig = go.Figure()
+        temp_data = data[['ElapsedMinutes', 'PTemp']].compute()
+        temp_fig.add_trace(go.Scatter(
+            x=temp_data['ElapsedMinutes'],
+            y=temp_data['PTemp'],
+            mode='lines+markers',
+            name='Temperature',
+            line=dict(color='red')
+        ))
+       
+        temp_fig.update_layout(
+            title='Temperature vs Time',
+            xaxis_title='Time Elapsed (Minutes)',
+            yaxis_title='Temperature (°C)'
+        )
+        temp_fig.update_xaxes(
+            tickvals=[(t - start_time).total_seconds() / 60 for t in time_ticks],
+            ticktext=[t.strftime('%H:%M') for t in time_ticks]
         )
 
         # Create 3D Scatter Plot
@@ -1068,4 +1094,6 @@ def print_report(n_clicks, figure, temp_figure, scatter_3d_figure, pie_figure, m
     return 0
 
 if __name__ == '__main__':
+    # Initialize Dask client
+    client = Client(LocalCluster(processes=False))
     app.run_server(debug=False)
