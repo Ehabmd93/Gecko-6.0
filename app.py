@@ -1,33 +1,34 @@
 import sys
 import numpy as np
 import pandas as pd
-import dask
-import dask.dataframe as dd
+import dash
 from dash import Dash, dcc, html, Input, Output, State, dash_table
+from dash.exceptions import PreventUpdate
 import plotly.graph_objects as go
 import plotly.express as px
+import plotly.io as pio
+import re
 import base64
 import io
+import datetime as dt
 import os
-import webbrowser
-from sqlalchemy import create_engine, Table, Column, Integer, String, MetaData, Float, TIMESTAMP
+import time
+import json
+from functools import lru_cache
+from sqlalchemy import create_engine, Table, Column, Integer, String, MetaData, Float, TIMESTAMP, select, func, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import QueuePool
-from dask.distributed import Client, LocalCluster
 import logging
-import datetime as dt
-import re
-from functools import lru_cache
 
-# Set up logging
-logging.basicConfig(filename='app_errors.log', level=logging.ERROR, format='%(asctime)s %(levelname)s: %(message)s')
+logging.basicConfig(filename='app_errors.log', level=logging.ERROR, 
+                    format='%(asctime)s %(levelname)s: %(message)s')
 
 def log_error(message):
     print(message)  # Print to console
     logging.error(message)  # Log to file
 
 # Environment variables
-DATABASE_URL = os.environ.get('DATABASE_URL', 'your_database_url_here')
+DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://qhbw_sql_vx26_user:glwGtA9yoGUtBrow7YdM9Ps80xNkGQIL@dpg-cqli5h08fa8c73aurv40-a.oregon-postgres.render.com/qhbw_sql_vx26')
 
 # Initialize SQLAlchemy engine with connection pooling
 engine = create_engine(DATABASE_URL, poolclass=QueuePool, pool_size=10, max_overflow=20, pool_pre_ping=True)
@@ -70,28 +71,17 @@ processed_data = Table(
 # Create tables if they don't exist
 metadata.create_all(engine)
 
-# Initialize Dask client
-def initialize_dask_client():
-    return Client(LocalCluster(processes=False, threads_per_worker=4, n_workers=2))
-
-# Use this function to get the client when needed
-def get_dask_client():
-    global client
-    if 'client' not in globals() or not client.scheduler_info():
-        client = initialize_dask_client()
-    return client
-
 @lru_cache(maxsize=None)
 def get_unique_values(table_name, column_name, hole_id=None):
     try:
         with engine.connect() as connection:
             if column_name == 'hole_id':
-                query = "SELECT DISTINCT hole_id FROM processed_data ORDER BY hole_id"
+                query = text("SELECT DISTINCT hole_id FROM processed_data ORDER BY hole_id")
                 result = connection.execute(query)
                 return [row[0] for row in result]
             elif column_name == 'stage':
                 if hole_id:
-                    query = "SELECT DISTINCT stage FROM processed_data WHERE hole_id = :hole_id ORDER BY stage"
+                    query = text("SELECT DISTINCT stage FROM processed_data WHERE hole_id = :hole_id ORDER BY stage")
                     result = connection.execute(query, {"hole_id": hole_id})
                     return [row[0] for row in result]
                 else:
@@ -121,18 +111,18 @@ def clean_data(data):
             'waterDepth', 'holeAngle', 'vmarshGrout', 'vmarshWater', 'Notes'
         ]
         
-        data = data.reset_index(drop=True)
+        data = data.drop([0, 1, 2]).reset_index(drop=True)
         data.columns = headers
-        data = data.iloc[1:]  # Drop the first row
+        data = data.drop(data.index[0])
 
-        data['TIMESTAMP'] = dd.to_datetime(data['TIMESTAMP'], errors='coerce')
+        data['TIMESTAMP'] = pd.to_datetime(data['TIMESTAMP'], errors='coerce')
         data = data.dropna(subset=['TIMESTAMP'])
 
         numeric_columns = ['flow', 'AvgFlow', 'volume', 'gaugePressure', 'AvgGaugePressure', 
                            'effPressure', 'AvgEffectivePressure', 'Lugeon', 'Batt_V', 'PTemp', 
                            'holeNum', 'mixNum', 'waterTable', 'stageTop', 'stageBottom', 
                            'gaugeHeight', 'waterDepth', 'holeAngle', 'vmarshGrout', 'vmarshWater']
-        data[numeric_columns] = data[numeric_columns].astype(float)
+        data[numeric_columns] = data[numeric_columns].apply(pd.to_numeric, errors='coerce')
 
         return data
     except Exception as e:
@@ -144,10 +134,9 @@ def parse_contents(contents, filename):
     decoded = base64.b64decode(content_string)
     try:
         if 'csv' in filename:
-            df = dd.read_csv(io.BytesIO(decoded))
+            df = pd.read_csv(io.StringIO(decoded.decode('utf-8')))
         elif 'xls' in filename or 'xlsx' in filename:
-            pandas_df = pd.read_excel(io.BytesIO(decoded), sheet_name='Raw Data', engine='openpyxl' if 'xlsx' in filename else 'xlrd')
-            df = dd.from_pandas(pandas_df, npartitions=4)
+            df = pd.read_excel(io.BytesIO(decoded), sheet_name='Raw Data', engine='openpyxl' if 'xlsx' in filename else 'xlrd')
         else:
             raise ValueError("Unsupported file type")
         cleaned_data = clean_data(df)
@@ -159,11 +148,10 @@ def parse_contents(contents, filename):
 
 def store_processed_data(df, hole_id, stage):
     try:
-        df['hole_id'] = hole_id
-        df['stage'] = stage
-        df['Notes'] = df['Notes'].replace({'NaN': '', 'nan': ''}).fillna('')
-        df = df.compute()  # Convert Dask DataFrame to Pandas DataFrame
         with engine.begin() as connection:
+            df['hole_id'] = hole_id
+            df['stage'] = stage
+            df['Notes'] = df['Notes'].replace({'NaN': '', 'nan': ''}).fillna('')
             df.to_sql('processed_data', connection, if_exists='append', index=False, method='multi', chunksize=1000)
         print(f"Data for {hole_id} {stage} stored successfully.")
     except Exception as e:
@@ -171,14 +159,17 @@ def store_processed_data(df, hole_id, stage):
 
 def retrieve_processed_data(hole_id, stage):
     try:
-        client = get_dask_client()
-        query = f"SELECT * FROM processed_data WHERE hole_id = '{hole_id}' AND stage = '{stage}' ORDER BY TIMESTAMP"
-        df = dd.read_sql_table('processed_data', engine, index_col='id', query=query)
+        query = text("""
+            SELECT * FROM processed_data 
+            WHERE hole_id = :hole_id AND stage = :stage
+            ORDER BY "TIMESTAMP"
+        """)
+        df = pd.read_sql_query(query, engine, params={"hole_id": hole_id, "stage": stage})
         
-        if df.npartitions == 0:
+        if df.empty:
             print(f"No data found for hole_id: {hole_id} and stage: {stage}")
         else:
-            print(f"Retrieved data for hole_id: {hole_id} and stage: {stage}")
+            print(f"Retrieved {len(df)} rows for hole_id: {hole_id} and stage: {stage}")
         
         # Clean the Notes column
         if 'Notes' in df.columns:
@@ -190,28 +181,42 @@ def retrieve_processed_data(hole_id, stage):
         return None
 
 def track_mixes_and_marsh_values(data):
-    try:
-        mix_counts = data.groupby('mixNum').size().compute().to_dict()
-        marsh_changes = data['vmarshGrout'].ne(data['vmarshGrout'].shift()).compute().sum()
-        
-        zero_flow_interval = calculate_cumulative_zero_flow(data)
+    mix_counts = {'A': 0, 'B': 0, 'C': 0, 'D': 0}
+    marsh_values = {'A': None, 'B': None, 'C': None, 'D': None}
+    current_mix = 'A'
 
-        return {
-            'Mix A': mix_counts.get(2, 0),
-            'Mix B': mix_counts.get(3, 0),
-            'Mix C': mix_counts.get(4, 0),
-            'Mix D': mix_counts.get(5, 0),
-            'Marsh Changes': marsh_changes,
-            'Cumulative Zero Flow': zero_flow_interval
-        }
-    except Exception as e:
-        log_error(f"Error tracking mixes and marsh values: {e}")
-        return {}
+    for _, row in data.iterrows():
+        mix_num = row['mixNum']
+        marsh_value = row['vmarshGrout']
+
+        if marsh_values[current_mix] is None:
+            marsh_values[current_mix] = marsh_value
+            mix_counts[current_mix] += 1
+        elif marsh_value != marsh_values[current_mix]:
+            mix_counts[current_mix] += 1
+            marsh_values[current_mix] = marsh_value
+
+        if mix_num == 3 and current_mix == 'A':
+            current_mix = 'B'
+        elif mix_num == 4 and current_mix == 'B':
+            current_mix = 'C'
+        elif mix_num == 5 and current_mix == 'C':
+            current_mix = 'D'
+
+    zero_flow_interval = calculate_cumulative_zero_flow(data)
+
+    return {
+        'Mix A': mix_counts['A'],
+        'Mix B': mix_counts['B'],
+        'Mix C': mix_counts['C'],
+        'Mix D': mix_counts['D'],
+        'Cumulative Zero Flow': zero_flow_interval
+    }
 
 def identify_marsh_changes(data):
     try:
         marsh_changes = data[data['vmarshGrout'].diff() != 0]
-        return marsh_changes[['TIMESTAMP', 'mixNum', 'vmarshGrout', 'flow']].compute()
+        return marsh_changes[['TIMESTAMP', 'mixNum', 'vmarshGrout', 'flow']]
     except Exception as e:
         log_error(f"Error identifying Marsh changes: {e}")
         return pd.DataFrame(columns=['TIMESTAMP', 'mixNum', 'vmarshGrout', 'flow'])
@@ -223,15 +228,14 @@ def extract_notes(data):
 
         notes_data = data[['TIMESTAMP', 'Notes']].copy()
         notes_data = notes_data[
-            (notes_data['Notes'].notnull()) & 
+            (notes_data['Notes'].notna()) & 
             (notes_data['Notes'] != '') & 
             (notes_data['Notes'].astype(str) != 'NaN')
         ]
         
-        if notes_data.npartitions == 0:
+        if notes_data.empty:
             return pd.DataFrame(columns=['Timestamp', 'Note'])
 
-        notes_data = notes_data.compute()
         notes_data.columns = ['Timestamp', 'Note']
         notes_data['Timestamp'] = pd.to_datetime(notes_data['Timestamp']).dt.strftime('%H:%M')
         return notes_data
@@ -255,16 +259,14 @@ def update_notes_table(notes_data):
 
 def generate_interactive_graph(data):
     try:
-        if data is None or data.npartitions == 0:
+        if data is None or data.empty:
             return None, None, None, None, None, None, None
 
-        client = get_dask_client()
         marsh_changes = identify_marsh_changes(data)
         notes_data = extract_notes(data)
 
-        hole_id = data['holeNum'].compute().iloc[0] if 'holeNum' in data.columns else 'Unknown'
-        start_time = data['TIMESTAMP'].min().compute()
-        end_time = data['TIMESTAMP'].max().compute()
+        hole_id = data['holeNum'].iloc[0] if 'holeNum' in data.columns else 'Unknown'
+        start_time = data['TIMESTAMP'].min()
         data['ElapsedMinutes'] = (data['TIMESTAMP'] - start_time).dt.total_seconds() / 60
 
         fig = go.Figure()
@@ -272,12 +274,12 @@ def generate_interactive_graph(data):
         mix_colors = {2: 'blue', 3: 'cyan', 4: 'magenta', 5: 'orange'}
         mix_labels = {2: 'A', 3: 'B', 4: 'C', 5: 'D'}
         for mix, color in mix_colors.items():
-            mix_data = data[data['mixNum'] == mix].compute()
+            mix_data = data[data['mixNum'] == mix]
             if not mix_data.empty:
                 add_trace(fig, mix_data, f'Flow Rate Mix {mix_labels[mix]}', 'flow', color)
                 add_trace(fig, mix_data, f'Effective Pressure Mix {mix_labels[mix]}', 'effPressure', 'green', yaxis='y2')
 
-        mix_changes = data[data['mixNum'].diff().abs() > 0].compute()
+        mix_changes = data[data['mixNum'].diff().abs() > 0]
         for _, row in mix_changes.iterrows():
             mix_change_min = (row['TIMESTAMP'] - start_time).total_seconds() / 60
             fig.add_vline(x=mix_change_min, line=dict(color='red', width=2, dash='dash'))
@@ -293,7 +295,7 @@ def generate_interactive_graph(data):
                 textposition='top center'
             ))
 
-        time_ticks = pd.date_range(start=start_time, end=end_time, freq='15T')
+        time_ticks = pd.date_range(start=start_time, end=data['TIMESTAMP'].max(), freq='15T')
         fig.update_xaxes(
             tickvals=[(t - start_time).total_seconds() / 60 for t in time_ticks],
             ticktext=[t.strftime('%H:%M') for t in time_ticks],
@@ -309,14 +311,7 @@ def generate_interactive_graph(data):
 
         # Create temperature plot
         temp_fig = go.Figure()
-        temp_data = data[['ElapsedMinutes', 'PTemp']].compute()
-        temp_fig.add_trace(go.Scatter(
-            x=temp_data['ElapsedMinutes'],
-            y=temp_data['PTemp'],
-            mode='lines+markers',
-            name='Temperature',
-            line=dict(color='red')
-        ))
+        add_trace(temp_fig, data, 'Temperature', 'PTemp', 'red')
         temp_fig.update_layout(
             title='Temperature vs Time',
             xaxis_title='Time Elapsed (Minutes)',
@@ -328,22 +323,21 @@ def generate_interactive_graph(data):
         )
 
         # Create 3D Scatter Plot
-        scatter_data = data[['Lugeon', 'flow', 'effPressure', 'mixNum']].compute()
         scatter_3d_fig = go.Figure(data=go.Scatter3d(
-            x=scatter_data['Lugeon'],
-            y=scatter_data['flow'],
-            z=scatter_data['effPressure'],
+            x=data['Lugeon'],
+            y=data['flow'],
+            z=data['effPressure'],
             mode='markers',
             marker=dict(
                 size=5,
-                color=scatter_data['mixNum'],
+                color=data['mixNum'],
                 colorscale=['blue', 'cyan', 'magenta', 'orange'],
                 opacity=0.8,
                 colorbar=dict(title="Mix Type"),
                 cmin=2,
                 cmax=5
             ),
-            text=[f"Mix {mix_labels[m]}" for m in scatter_data['mixNum']],
+            text=[f"Mix {mix_labels[m]}" for m in data['mixNum']],
             hoverinfo='text'
         ))
         scatter_3d_fig.update_layout(
@@ -367,9 +361,8 @@ def generate_interactive_graph(data):
 
         # Create Lugeon vs Effective Pressure plot
         lugeon_fig = go.Figure()
-        lugeon_data = data[['ElapsedMinutes', 'Lugeon', 'effPressure']].compute()
-        add_trace(lugeon_fig, lugeon_data, 'Lugeon', 'Lugeon', 'black')
-        add_trace(lugeon_fig, lugeon_data, 'Effective Pressure', 'effPressure', 'green', yaxis='y2')
+        add_trace(lugeon_fig, data, 'Lugeon', 'Lugeon', 'black')
+        add_trace(lugeon_fig, data, 'Effective Pressure', 'effPressure', 'green', yaxis='y2')
 
         lugeon_fig.update_layout(
             title='Lugeon and Effective Pressure vs Time',
@@ -404,7 +397,7 @@ def add_trace(fig, data, name, y_col, color, yaxis='y'):
 def calculate_cumulative_zero_flow(data):
     try:
         # Convert TIMESTAMP to datetime if it's not already
-        data['TIMESTAMP'] = dd.to_datetime(data['TIMESTAMP'])
+        data['TIMESTAMP'] = pd.to_datetime(data['TIMESTAMP'])
         
         # Create a mask for zero flow
         zero_flow_mask = data['flow'] == 0
@@ -417,7 +410,7 @@ def calculate_cumulative_zero_flow(data):
         zero_flow_durations['duration'] = (zero_flow_durations['last'] - zero_flow_durations['first']).dt.total_seconds() / 3600
         
         # Sum durations of periods longer than 10 minutes (0.1667 hours)
-        cumulative_zero_flow = zero_flow_durations[zero_flow_durations['duration'] > 0.1667]['duration'].sum().compute()
+        cumulative_zero_flow = zero_flow_durations[zero_flow_durations['duration'] > 0.1667]['duration'].sum()
         
         # Ensure the result is not negative
         cumulative_zero_flow = max(0, cumulative_zero_flow)
@@ -431,8 +424,8 @@ def calculate_cumulative_zero_flow(data):
 
 def calculate_grout_and_mix_volumes(data):
     try:
-        cumulative_grout = data['volume'].max().compute()
-        mix_volumes = data.groupby('mixNum')['volume'].max().diff().fillna(data.groupby('mixNum')['volume'].max()).compute()
+        cumulative_grout = data['volume'].iloc[-1]
+        mix_volumes = data.groupby('mixNum')['volume'].last().diff().fillna(data.groupby('mixNum')['volume'].last())
         mix_a_volume = mix_volumes.get(2, 0)
         mix_b_volume = mix_volumes.get(3, 0)
         mix_c_volume = mix_volumes.get(4, 0)
@@ -446,29 +439,29 @@ def calculate_grout_and_mix_volumes(data):
 def update_injection_details(data, selected_stage, selected_hole_id):
     try:
         # Data validation checks
-        print(f"Debug: Data shape: {data.shape[0].compute()} rows, {len(data.columns)} columns")
+        print(f"Debug: Data shape: {data.shape}")
         print(f"Debug: Columns: {data.columns.tolist()}")
         print(f"Debug: Flow column dtype: {data['flow'].dtype}")
-        print(f"Debug: Flow column range: {data['flow'].min().compute()} to {data['flow'].max().compute()}")
-        print(f"Debug: Timestamp range: {data['TIMESTAMP'].min().compute()} to {data['TIMESTAMP'].max().compute()}")
+        print(f"Debug: Flow column range: {data['flow'].min()} to {data['flow'].max()}")
+        print(f"Debug: Timestamp range: {data['TIMESTAMP'].min()} to {data['TIMESTAMP'].max()}")
         
         # Check for negative flows
-        negative_flows = data[data['flow'] < 0].compute()
+        negative_flows = data[data['flow'] < 0]
         if not negative_flows.empty:
             print(f"Warning: Negative flows detected: {len(negative_flows)} rows")
 
         # Check for duplicate timestamps
-        duplicate_timestamps = data[data.duplicated('TIMESTAMP', keep=False)].compute()
+        duplicate_timestamps = data[data.duplicated('TIMESTAMP', keep=False)]
         if not duplicate_timestamps.empty:
             print(f"Warning: Duplicate timestamps detected: {len(duplicate_timestamps)} rows")
 
-        data['TIMESTAMP'] = dd.to_datetime(data['TIMESTAMP'])
+        data['TIMESTAMP'] = pd.to_datetime(data['TIMESTAMP'])
         non_zero_flow = data[data['flow'] > 0]
-        first_non_zero_flow_time = non_zero_flow['TIMESTAMP'].min().compute()
-        last_timestamp = data['TIMESTAMP'].max().compute()
+        first_non_zero_flow_time = non_zero_flow['TIMESTAMP'].min()
+        last_timestamp = data['TIMESTAMP'].max()
 
-        stage_top = data['stageTop'].compute().iloc[0]
-        stage_bottom = data['stageBottom'].compute().iloc[0]
+        stage_top = data.loc[data['TIMESTAMP'].idxmin(), 'stageTop']
+        stage_bottom = data.loc[data['TIMESTAMP'].idxmin(), 'stageBottom']
         stage_length = stage_bottom - stage_top
 
         first_date = first_non_zero_flow_time.strftime('%Y-%m-%d')
@@ -486,8 +479,8 @@ def update_injection_details(data, selected_stage, selected_hole_id):
         print(f"Debug: Zero flow interval: {zero_flow_interval:.2f} hours")
         print(f"Debug: Net grouting time: {net_grouting_time:.2f} hours")
 
-        water_depth = data['waterDepth'].compute().iloc[0]
-        v_marsh_water = data['vmarshWater'].compute().iloc[0]
+        water_depth = data['waterDepth'].iloc[0]
+        v_marsh_water = data['vmarshWater'].iloc[0]
 
         details = [
             html.H2("Grout Injection Summary"),
@@ -544,10 +537,10 @@ def apply_tma(data, window_size=5):
 
 def calculate_stage_volumes():
     try:
-        query = "SELECT stage, hole_id, MAX(volume) as total_volume FROM processed_data GROUP BY stage, hole_id ORDER BY total_volume"
-        df = dd.read_sql_query(query, engine)
+        query = text("SELECT stage, hole_id, MAX(volume) as total_volume FROM processed_data GROUP BY stage, hole_id ORDER BY total_volume")
+        df = pd.read_sql_query(query, engine)
         df['stage_hole_id'] = df['stage'] + ', ' + df['hole_id']
-        return df.compute()
+        return df
     except Exception as e:
         log_error(f"Error calculating stage volumes: {e}")
         return pd.DataFrame(columns=['stage', 'hole_id', 'total_volume'])
@@ -741,10 +734,8 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
     ctx = dash.callback_context
     trigger_id = ctx.triggered[0]['prop_id'].split('.')[0]
 
-    try:
-        client = get_dask_client()
-        
-        if trigger_id == 'upload-data' and contents:
+    if trigger_id == 'upload-data' and contents:
+        try:
             df, mixes_and_marsh = parse_contents(contents, filename)
             if df is None:
                 raise ValueError("Error parsing file contents")
@@ -754,8 +745,8 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
             # Generate MA graph
             df_ma = apply_tma(df)
             ma_fig = go.Figure()
-            add_trace(ma_fig, df_ma.compute(), 'Flow Rate (MA)', 'flow_tma', 'blue')
-            add_trace(ma_fig, df_ma.compute(), 'Effective Pressure (MA)', 'effPressure_tma', 'green', yaxis='y2')
+            add_trace(ma_fig, df_ma, 'Flow Rate (MA)', 'flow_tma', 'blue')
+            add_trace(ma_fig, df_ma, 'Effective Pressure (MA)', 'effPressure_tma', 'green', yaxis='y2')
             ma_fig.update_layout(
                 title='Noise Reduction (Moving Average)',
                 yaxis=dict(title='Flow Rate (L/min)', side='left'),
@@ -768,7 +759,7 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
                 html.P(f"Mix {mix}: {count} times") for mix, count in mixes_and_marsh.items() if mix not in ['Cumulative Zero Flow']
             ])
             
-            stage_length = df['stageBottom'].compute().iloc[0] - df['stageTop'].compute().iloc[0]
+            stage_length = df['stageBottom'].iloc[0] - df['stageTop'].iloc[0]
             error_summary = []
             if stage_length < 6:
                 error_summary.append("Short stage length detected")
@@ -784,14 +775,21 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
 
             return (f"File '{filename}' processed successfully", "",
                     fig, temp_fig, scatter_3d_fig, pie_fig, ma_fig, lugeon_fig, injection_details, mix_summary, error_summary, giv_operator_notes, "")
+        except Exception as e:
+            error_message = f"Error processing file: {str(e)}"
+            log_error(error_message)
+            return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
 
-        elif trigger_id == 'load-data-button' and hole_id and stage:
+    elif trigger_id == 'load-data-button' and hole_id and stage:
+        try:
             print(f"Attempting to load data for hole_id: {hole_id}, stage: {stage}")
             data = retrieve_processed_data(hole_id, stage)
-            if data is None or data.npartitions == 0:
-                raise ValueError(f"No data found for Hole ID: {hole_id} and Stage: {stage}")
+            if data is None or data.empty:
+                error_message = f"No data found for Hole ID: {hole_id} and Stage: {stage}"
+                log_error(error_message)
+                return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
 
-            print(f"Data retrieved successfully. Shape: {data.shape[0].compute()} rows")
+            print(f"Data retrieved successfully. Shape: {data.shape}")
             mixes_and_marsh = track_mixes_and_marsh_values(data)
             
             fig, temp_fig, scatter_3d_fig, pie_fig, _, notes_data, lugeon_fig = generate_interactive_graph(data)
@@ -799,8 +797,8 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
             # Generate MA graph
             data_ma = apply_tma(data)
             ma_fig = go.Figure()
-            add_trace(ma_fig, data_ma.compute(), 'Flow Rate (MA)', 'flow_tma', 'blue')
-            add_trace(ma_fig, data_ma.compute(), 'Effective Pressure (MA)', 'effPressure_tma', 'green', yaxis='y2')
+            add_trace(ma_fig, data_ma, 'Flow Rate (MA)', 'flow_tma', 'blue')
+            add_trace(ma_fig, data_ma, 'Effective Pressure (MA)', 'effPressure_tma', 'green', yaxis='y2')
             ma_fig.update_layout(
                 title='Noise Reduction (Moving Average)',
                 yaxis=dict(title='Flow Rate (L/min)', side='left'),
@@ -810,18 +808,17 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
             
             injection_details = update_injection_details(data, stage, hole_id)
             mix_summary = html.Div([
-                html.P(f"Mix {mix}: {count} times") for mix, count in mixes_and_marsh.items() if mix not in ['Cumulative Zero Flow', 'Marsh Changes']
+                html.P(f"Mix {mix}: {count} times") for mix, count in mixes_and_marsh.items() if mix not in ['Cumulative Zero Flow']
             ])
             
-            stage_length = data['stageBottom'].compute().iloc[0] - data['stageTop'].compute().iloc[0]
+            stage_length = data['stageBottom'].iloc[0] - data['stageTop'].iloc[0]
             error_summary = []
             if stage_length < 6:
                 error_summary.append("Short stage length detected")
             elif stage_length > 6:
                 error_summary.append("Long stage length detected")
-            error_summary.append(f"Marsh changes: {mixes_and_marsh['Marsh Changes']}")
-            error_summary.append(f"Cumulative Zero Flow: {mixes_and_marsh['Cumulative Zero Flow']:.2f} hours")
-            error_summary = html.Div([html.P(error) for error in error_summary])
+            error_summary.extend([html.Span(error, style={'color': 'red'}) for error in mixes_and_marsh.get('Errors', [])] or ["NA"])
+            error_summary = html.Div(error_summary)
 
             giv_operator_notes = html.Div([
                 html.H3("GIV Operator Notes:"),
@@ -829,15 +826,14 @@ def update_and_run_tool(contents, run_clicks, load_clicks, hole_id, stage, filen
             ]) if not notes_data.empty else ""
 
             return f"Data for {hole_id} {stage} loaded successfully", "", fig, temp_fig, scatter_3d_fig, pie_fig, ma_fig, lugeon_fig, injection_details, mix_summary, error_summary, giv_operator_notes, ""
-
-    except Exception as e:
-        error_message = f"Error processing data: {str(e)}"
-        log_error(error_message)
-        return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
+        except Exception as e:
+            error_message = f"Error loading data: {str(e)}"
+            log_error(error_message)
+            return "", error_message, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, ""
 
     raise PreventUpdate
 
-# Callback to show stage volumes
+# New Callback to show stage volumes
 @app.callback(
     Output('stage-volumes-graph', 'style'),
     Output('stage-volumes-graph', 'figure'),
@@ -942,6 +938,7 @@ def toggle_lugeon_graph(n_clicks):
 )
 def open_email_client(n_clicks):
     if n_clicks > 0:
+        import webbrowser
         mailto_link = "mailto:Ehab.Mdallal@wsp.com?subject=Grout Gecko V-1.0 Feedback&body=This app is designed for the QHBW project to perform deep analysis, identify human errors, and collect high-quality data, enhancing the QHBW Leapfrog model. Please note that this tool is still under development. Bugs and inaccuracies might be found; your feedback is appreciated.%0D%0ARegards"
         webbrowser.open(mailto_link)
     return 0
@@ -1080,6 +1077,7 @@ def print_report(n_clicks, figure, temp_figure, scatter_3d_figure, pie_figure, m
                 f.write(html_content)
 
             # Open the HTML file in the default web browser
+            import webbrowser
             webbrowser.open('file://' + os.path.realpath(output_path), new=2)
 
             print(f"HTML report generated and opened: {output_path}")
@@ -1090,5 +1088,4 @@ def print_report(n_clicks, figure, temp_figure, scatter_3d_figure, pie_figure, m
     return 0
 
 if __name__ == '__main__':
-    client = initialize_dask_client()
     app.run_server(debug=False)
