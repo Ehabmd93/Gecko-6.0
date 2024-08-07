@@ -1,48 +1,138 @@
-services:
-  - type: web
-    name: grout-gecko
-    env: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:server
-    envVars:
-      - key: PYTHON_VERSION
-        value: 3.9.16
-      - key: DATABASE_URL
-        sync: false
-
-# .gitignore
-# Python
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
 
-# Virtual Environment
-venv/
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+#  Usually these files are written by a python script from a template
+#  before PyInstaller builds the exe, so as to inject date/other infos into it.
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+#   For a library or tool, you might want to ignore these files since the code is
+#   intended to run in multiple environments; otherwise, check in the pyenv files
+#   for the project's default Python version.
+# .python-version
+
+# Environments
+.env
+.venv
 env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Spyder project settings
+.spyderproject
+.spyderworkspace
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# dotenv
 .env
 
-# IDEs and Editors
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# Operating System
-.DS_Store
-Thumbs.db
-
-# Application Specific
+# Log files
 *.log
-Grout_Gecko_V1.0_QHBW_Grouting_Data_QC_Report.html
 
-# Dask
+# Local dev environment
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+
+# Pyright
+.pyright/
+
+# Editor directories and files
+.vscode/
+*.swp
+*~
+
+# Dash
+app_errors.log
+
+# SQLAlchemy
+sqlalchemy.log
+
+# Gunicorn
+gunicorn_config.pyc
+
+# Data files
+*.csv
+*.xls
+*.xlsx
+*.db
+*.sqlite
+
+# Generated HTML reports
+*.html
+
+# Ignore any other binary or temporary files
+*.bak
+*.tmp
+*.old
+
+# Dask-related
+dask-worker-space/
 dask-worker-space/
 
-# Render specific
-.render-buildpacks.json
-
-# Temporary files
-*.tmp
-
-# Database
-*.sqlite3
+# Ignore the logo if it's only used locally
+Lizard_Logo.jpg
